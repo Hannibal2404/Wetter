@@ -67,7 +67,9 @@ Alle Schwellwerte stehen zentral im `CONFIG`-Block oben in
 | `glaette_temp` | Ab/unter dieser Lufttemperatur + Nässe/Schnee → Glätte-Hinweis (°C) |
 | `wind.gust_warn` / `gust_bad` | Windböen für „böig" bzw. „Sturmböen" (km/h) |
 | `sun.cloud_max` / `uv_warn` | Ab wann es als „pralle Sonne" gilt (Wolken % / UV) |
-| `days` | Wie viele Tage voraus (Standard 2 = heute + morgen) |
+| `days` | Detailtage mit Karten (Standard 2 = heute + morgen) |
+| `week_days` | Tage im kompakten 7-Tage-Ausblick (Standard 7) |
+| `rain_horizon_h` | Vorausschau-Fenster für den Nächster-Regen-Hinweis (Std) |
 
 **Harte Ausschlüsse** (immer „schlecht", unabhängig von den Schwellen): Gewitter,
 Schnee und Glatteis – erkannt am WMO-`weather_code` von Open-Meteo. Jedes Fenster
