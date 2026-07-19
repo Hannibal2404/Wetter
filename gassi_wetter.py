@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
+import math
 import sys
 import time
 from datetime import datetime, timedelta
@@ -557,6 +559,107 @@ def _day_html(day: dict) -> str:
     </section>"""
 
 
+# ---------------------------------------------------------------------------
+# APP-ICON  --  "Pfote & Sonne" (Auswahl B): SVG fuers Tab, PNGs fuer Homescreen
+# ---------------------------------------------------------------------------
+APP_NAME = "Gassi Wetter"
+
+# Vektor-Icon (Browser-Tab / Android-PWA). Amber Sonne mit Hundepfote.
+ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <defs><radialGradient id="bg" cx="0.5" cy="0.42" r="0.75">
+    <stop offset="0" stop-color="#2e2620"/><stop offset="1" stop-color="#14110d"/></radialGradient></defs>
+  <rect width="120" height="120" rx="26" fill="url(#bg)"/>
+  <g stroke="#fab219" stroke-width="5" stroke-linecap="round">
+    <line x1="60" y1="16" x2="60" y2="27"/><line x1="60" y1="93" x2="60" y2="104"/>
+    <line x1="16" y1="60" x2="27" y2="60"/><line x1="93" y1="60" x2="104" y2="60"/>
+    <line x1="29" y1="29" x2="37" y2="37"/><line x1="83" y1="83" x2="91" y2="91"/>
+    <line x1="91" y1="29" x2="83" y2="37"/><line x1="37" y1="83" x2="29" y2="91"/></g>
+  <circle cx="60" cy="60" r="27" fill="#fab219"/>
+  <g fill="#14110d">
+    <ellipse cx="60" cy="66" rx="11" ry="9"/>
+    <ellipse cx="47" cy="55" rx="4.4" ry="6"/><ellipse cx="55" cy="49" rx="4.4" ry="6"/>
+    <ellipse cx="65" cy="49" rx="4.4" ry="6"/><ellipse cx="73" cy="55" rx="4.4" ry="6"/></g>
+</svg>"""
+
+MANIFEST = {
+    "name": APP_NAME,
+    "short_name": APP_NAME,
+    "description": "Beste Gassi-Zeiten fuer Magdeburg",
+    "start_url": ".",
+    "scope": ".",
+    "display": "standalone",
+    "background_color": "#15120F",
+    "theme_color": "#15120F",
+    "icons": [
+        {"src": "icon.svg", "type": "image/svg+xml",
+         "sizes": "any", "purpose": "any"},
+        {"src": "icon-192.png", "type": "image/png",
+         "sizes": "192x192", "purpose": "any maskable"},
+        {"src": "icon-512.png", "type": "image/png",
+         "sizes": "512x512", "purpose": "any maskable"},
+    ],
+}
+
+# Kopf-Tags fuer Favicon, Homescreen-Icon, Manifest & Standalone-Modus.
+ICON_HEAD = (
+    '<link rel="icon" type="image/svg+xml" href="icon.svg">\n'
+    '<link rel="apple-touch-icon" href="icon-180.png">\n'
+    '<link rel="manifest" href="manifest.webmanifest">\n'
+    '<meta name="theme-color" content="#15120F">\n'
+    '<meta name="apple-mobile-web-app-capable" content="yes">\n'
+    '<meta name="mobile-web-app-capable" content="yes">\n'
+    '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">\n'
+    f'<meta name="apple-mobile-web-app-title" content="{APP_NAME}">'
+)
+
+
+def _paw_sun_png(size: int):
+    """Zeichnet das Icon (Pfote & Sonne) als PNG-Bild der Kantenlaenge `size`.
+    Motiv liegt in der zentralen ~70%-Zone -> auch als 'maskable' sicher."""
+    from PIL import Image, ImageDraw
+    s = size
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    amber, dark = (250, 178, 25, 255), (20, 17, 13, 255)
+    d.rounded_rectangle([0, 0, s - 1, s - 1], radius=int(s * 0.22),
+                        fill=(34, 28, 23, 255))
+    cx = cy = s / 2
+    # Sonnenstrahlen
+    r_in, r_out, w = s * 0.25, s * 0.35, max(2, int(s * 0.045))
+    for k in range(8):
+        a = math.radians(k * 45)
+        d.line([cx + math.cos(a) * r_in, cy + math.sin(a) * r_in,
+                cx + math.cos(a) * r_out, cy + math.sin(a) * r_out],
+               fill=amber, width=w)
+    # Sonne
+    r = s * 0.225
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=amber)
+    # Pfotenballen + vier Zehen (dunkel) auf der Sonne
+    prx, pry, pcy = s * 0.092, s * 0.075, cy + s * 0.05
+    d.ellipse([cx - prx, pcy - pry, cx + prx, pcy + pry], fill=dark)
+    trx, tr_y = s * 0.037, s * 0.05
+    for dx, dy in ((-0.108, -0.042), (-0.042, -0.092),
+                   (0.042, -0.092), (0.108, -0.042)):
+        tx, ty = cx + dx * s, cy + dy * s
+        d.ellipse([tx - trx, ty - tr_y, tx + trx, ty + tr_y], fill=dark)
+    return img
+
+
+def write_icons(out_dir: Path) -> None:
+    """Schreibt icon.svg, die PNG-Groessen und das Manifest ins Ausgabeverzeichnis.
+    Unabhaengig vom Wetter -> wird immer erzeugt (auch fuer die Fallback-Seite)."""
+    (out_dir / "icon.svg").write_text(ICON_SVG, encoding="utf-8")
+    try:
+        for size, name in ((180, "icon-180.png"), (192, "icon-192.png"),
+                           (512, "icon-512.png")):
+            _paw_sun_png(size).save(out_dir / name)
+    except ImportError:
+        print("Hinweis: Pillow fehlt – PNG-Icons uebersprungen (SVG greift).",
+              file=sys.stderr)
+    (out_dir / "manifest.webmanifest").write_text(
+        json.dumps(MANIFEST, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def build_html(days: list[dict], cfg: dict, now: datetime) -> str:
     loc = cfg["location"]["name"]
     stand = now.strftime("%d.%m.%Y, %H:%M Uhr")
@@ -569,13 +672,13 @@ def build_html(days: list[dict], cfg: dict, now: datetime) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex">
 <meta name="color-scheme" content="dark">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E⛅%3C/text%3E%3C/svg%3E">
-<title>Gassi-Wetter {loc}</title>
+<title>{APP_NAME}</title>
+{ICON_HEAD}
 <style>{CSS}</style>
 </head>
 <body>
   <header class="masthead">
-    <div class="kicker">⛅ Gassi-Planer</div>
+    <div class="kicker">🐾 Gassi-Planer</div>
     <h1 class="title">{loc}</h1>
     <p class="sub">Beste Zeitfenster für die Hunderunde &middot; Stand {stand}</p>
   </header>
@@ -614,13 +717,13 @@ def build_fallback_html(cfg: dict, now: datetime, err: str) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex">
 <meta name="color-scheme" content="dark">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E⛅%3C/text%3E%3C/svg%3E">
-<title>Gassi-Wetter {loc}</title>
+<title>{APP_NAME}</title>
+{ICON_HEAD}
 <style>{CSS}</style>
 </head>
 <body>
   <header class="masthead">
-    <div class="kicker">⛅ Gassi-Planer</div>
+    <div class="kicker">🐾 Gassi-Planer</div>
     <h1 class="title">{loc}</h1>
     <p class="sub">Stand {stand}</p>
   </header>
@@ -663,6 +766,7 @@ def main() -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "index.html"
+    write_icons(out_dir)  # Icons + Manifest (wetterunabhaengig)
 
     print(f"Ziehe Wetter für {CONFIG['location']['name']} ...")
     try:
