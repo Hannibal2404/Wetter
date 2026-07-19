@@ -83,7 +83,9 @@ CONFIG = {
     },
 
     # Anzeige
-    "days": 2,  # heute + morgen
+    "days": 2,       # detaillierte Tage mit Karten (heute + morgen)
+    "week_days": 7,  # kompakter Wochen-Ausblick unten
+    "rain_horizon_h": 6,  # Vorausschau fuer den Naechster-Regen-Hinweis (Std)
 }
 
 # API
@@ -99,8 +101,10 @@ LABEL = {GUT: "Gut", MITTEL: "Mittel", SCHLECHT: "Schlecht"}
 
 WOCHENTAGE = ["Montag", "Dienstag", "Mittwoch", "Donnerstag",
               "Freitag", "Samstag", "Sonntag"]
+WOCHENTAGE_ABBR = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 MONATE = ["", "Januar", "Februar", "Maerz", "April", "Mai", "Juni", "Juli",
           "August", "September", "Oktober", "November", "Dezember"]
+COMPASS = ["N", "NO", "O", "SO", "S", "SW", "W", "NW"]
 
 # WMO-Wettercodes (Open-Meteo), gruppiert fuer harte Ausschluesse.
 WX_THUNDER = {95, 96, 99}                  # Gewitter (ggf. mit Hagel)
@@ -144,10 +148,20 @@ def fetch_weather(cfg: dict) -> dict:
             "cloud_cover",
             "uv_index",
             "wind_gusts_10m",
+            "wind_direction_10m",
             "is_day",
         ]),
+        "daily": ",".join([
+            "weather_code",
+            "temperature_2m_max",
+            "temperature_2m_min",
+            "precipitation_probability_max",
+            "sunrise",
+            "sunset",
+        ]),
+        "minutely_15": "precipitation",
         "timezone": cfg["timezone"],
-        "forecast_days": cfg["days"],
+        "forecast_days": cfg.get("week_days", cfg["days"]),
     }
     last_err = None
     for attempt in range(3):
@@ -170,21 +184,23 @@ def fetch_weather(cfg: dict) -> dict:
 # ---------------------------------------------------------------------------
 def parse_hours(data: dict, cfg: dict, now: datetime) -> list[dict]:
     """Wandelt die parallelen Arrays in eine Liste von Stunden-Dicts um.
-    Vergangene Stunden (vor der aktuellen) werden verworfen."""
+    Vergangene Stunden bleiben erhalten (fuer den Stunden-Streifen), werden aber
+    als 'past' markiert; die aktuelle Stunde als 'is_now'."""
     h = data["hourly"]
     times = h["time"]
     out = []
     tz = ZoneInfo(cfg["timezone"])
+    now_floor = now.replace(minute=0, second=0, microsecond=0)
     for i, t in enumerate(times):
         dt = datetime.fromisoformat(t).replace(tzinfo=tz)
-        if dt < now.replace(minute=0, second=0, microsecond=0):
-            continue  # Vergangenheit ueberspringen
         hour = dt.hour
         if not (cfg["walk_hours"]["start"] <= hour <= cfg["walk_hours"]["end"]):
             continue  # ausserhalb der Gassi-Zeiten
         out.append({
             "dt": dt,
             "hour": hour,
+            "past": dt < now_floor,
+            "is_now": dt == now_floor,
             "temp": _num(h["temperature_2m"][i]),
             "feels": _num(h["apparent_temperature"][i]),
             "rain_prob": _num(h["precipitation_probability"][i]),
@@ -193,6 +209,7 @@ def parse_hours(data: dict, cfg: dict, now: datetime) -> list[dict]:
             "cloud": _num(h["cloud_cover"][i]),
             "uv": _num(h["uv_index"][i]),
             "gust": _num(h["wind_gusts_10m"][i]),
+            "wind_dir": _num(h["wind_direction_10m"][i]),
             "is_day": bool(h["is_day"][i]),
         })
     return out
@@ -200,6 +217,78 @@ def parse_hours(data: dict, cfg: dict, now: datetime) -> list[dict]:
 
 def _num(v, default=0.0):
     return default if v is None else v
+
+
+def _compass(deg: float) -> str:
+    """Grad -> 8-Punkt-Himmelsrichtung (aus welcher der Wind kommt)."""
+    return COMPASS[int((deg % 360) / 45 + 0.5) % 8]
+
+
+def _circular_mean(degs: list[float]) -> float:
+    """Mittelwert von Winkeln (Windrichtungen) korrekt ueber den 0/360-Sprung."""
+    if not degs:
+        return 0.0
+    s = sum(math.sin(math.radians(d)) for d in degs)
+    c = sum(math.cos(math.radians(d)) for d in degs)
+    return math.degrees(math.atan2(s, c)) % 360
+
+
+def parse_daily(data: dict, cfg: dict, now: datetime) -> list[dict]:
+    """Tages-Zusammenfassung fuer den 7-Tage-Ausblick + Sonnenauf-/untergang."""
+    d = data.get("daily")
+    if not d:
+        return []
+    tz = ZoneInfo(cfg["timezone"])
+    today = now.date()
+    out = []
+    for i, ds in enumerate(d["time"]):
+        date = datetime.fromisoformat(ds).date()
+        sr = datetime.fromisoformat(d["sunrise"][i]).replace(tzinfo=tz)
+        ss = datetime.fromisoformat(d["sunset"][i]).replace(tzinfo=tz)
+        off = (date - today).days
+        abbr = WOCHENTAGE_ABBR[date.weekday()]
+        out.append({
+            "date": date,
+            "abbr": "Heute" if off == 0 else ("Morgen" if off == 1 else abbr),
+            "kind": wx_info(int(_num(d["weather_code"][i])))[0],
+            "tmax": round(_num(d["temperature_2m_max"][i])),
+            "tmin": round(_num(d["temperature_2m_min"][i])),
+            "prob": int(_num(d["precipitation_probability_max"][i])),
+            "sunrise": sr, "sunset": ss,
+            "sunrise_str": sr.strftime("%H:%M"),
+            "sunset_str": ss.strftime("%H:%M"),
+        })
+    return out
+
+
+def parse_rain_outlook(data: dict, cfg: dict, now: datetime):
+    """15-Minuten-Regen -> naechster Regenbeginn bzw. naechste Regenpause.
+    Rueckgabe: (art, zeit) oder None. art: rain_soon/dry_soon/rain_hold/dry."""
+    m = data.get("minutely_15")
+    if not m or "precipitation" not in m:
+        return None
+    tz = ZoneInfo(cfg["timezone"])
+    now_min = now.replace(second=0, microsecond=0)
+    horizon = now_min + timedelta(hours=cfg.get("rain_horizon_h", 6))
+    seq = []
+    for t, p in zip(m["time"], m["precipitation"]):
+        dt = datetime.fromisoformat(t).replace(tzinfo=tz)
+        if dt < now_min:
+            continue
+        if dt > horizon:
+            break
+        seq.append((dt, _num(p)))
+    if not seq:
+        return None
+    if seq[0][1] > 0:  # es regnet gerade
+        for dt, p in seq:
+            if p == 0:
+                return ("dry_soon", dt)
+        return ("rain_hold", None)
+    for dt, p in seq:  # es ist trocken
+        if p > 0:
+            return ("rain_soon", dt)
+    return ("dry", None)
 
 
 def rate_hour(h: dict, cfg: dict) -> dict:
@@ -318,6 +407,7 @@ def _new_window(h: dict) -> dict:
         "rain_probs": [h["rain_prob"]],
         "clouds": [h["cloud"]],
         "gusts": [h["gust"]],
+        "dirs": [h["wind_dir"]],
         "penalties": [h["penalty"]],
         "badges": list(h["badges"]),
         "sev": h["wx_sev"],
@@ -332,6 +422,7 @@ def _extend_window(w: dict, h: dict) -> None:
     w["rain_probs"].append(h["rain_prob"])
     w["clouds"].append(h["cloud"])
     w["gusts"].append(h["gust"])
+    w["dirs"].append(h["wind_dir"])
     w["penalties"].append(h["penalty"])
     if h["wx_sev"] > w["sev"]:          # schlimmstes Wetter praegt das Icon
         w["sev"], w["kind"] = h["wx_sev"], h["wx_kind"]
@@ -350,6 +441,7 @@ def _finalize_window(w: dict) -> None:
     w["rain_max"] = int(max(w["rain_probs"]))
     w["cloud_avg"] = round(sum(w["clouds"]) / n)
     w["gust_max"] = round(max(w["gusts"]))
+    w["wind_dir"] = round(_circular_mean(w["dirs"]))
     w["avg_penalty"] = sum(w["penalties"]) / n
     w["length"] = w["end_hour"] - w["start_hour"] + 1
 
@@ -369,14 +461,15 @@ def pick_best(windows: list[dict]) -> dict | None:
 # ---------------------------------------------------------------------------
 # TAGE GRUPPIEREN
 # ---------------------------------------------------------------------------
-def group_days(hours: list[dict], now: datetime) -> list[dict]:
+def group_days(hours: list[dict], cfg: dict, now: datetime,
+               daily_by_date: dict) -> list[dict]:
     today = now.date()
     by_date: dict = {}
     for h in hours:
         by_date.setdefault(h["dt"].date(), []).append(h)
 
     days = []
-    for d in sorted(by_date):
+    for d in sorted(by_date)[:cfg["days"]]:   # nur die Detail-Tage
         offset = (d - today).days
         if offset == 0:
             label = "Heute"
@@ -384,14 +477,23 @@ def group_days(hours: list[dict], now: datetime) -> list[dict]:
             label = "Morgen"
         else:
             label = WOCHENTAGE[d.weekday()]
-        windows = build_windows(by_date[d])
+        day_hours = by_date[d]
+        # Karten/Fenster nur aus zukuenftigen Stunden; Streifen zeigt alles.
+        windows = build_windows([h for h in day_hours if not h["past"]])
+        dsum = daily_by_date.get(d, {})
         days.append({
             "date": d,
             "label": label,
             "weekday": WOCHENTAGE[d.weekday()],
             "date_str": f"{d.day}. {MONATE[d.month]}",
+            "is_today": offset == 0,
+            "hours_all": day_hours,
             "windows": windows,
             "best": pick_best(windows),
+            "sunrise": dsum.get("sunrise"),
+            "sunset": dsum.get("sunset"),
+            "sunrise_str": dsum.get("sunrise_str"),
+            "sunset_str": dsum.get("sunset_str"),
         })
     return days
 
@@ -490,6 +592,43 @@ body{background:var(--paper);color:var(--ink);font-family:var(--sans);
 .badge{font-size:12px;color:var(--ink);background:var(--chip);
   border:1px solid var(--line);border-radius:8px;padding:4px 9px;}
 
+/* Naechster-Regen-Hinweis */
+.outlook{display:flex;align-items:center;gap:8px;background:var(--chip);
+  border:1px solid var(--line);border-radius:10px;padding:9px 13px;
+  font-size:13.5px;margin:-8px 0 24px;}
+
+/* Stunden-Streifen (ganzer Tag auf einen Blick) */
+.ribbon{display:flex;gap:2px;margin:2px 0 5px;}
+.ribbon .rc{flex:1;height:26px;border-radius:3px;background:var(--line);}
+.ribbon .rc.gut{background:var(--good);}
+.ribbon .rc.mittel{background:var(--warn);}
+.ribbon .rc.schlecht{background:var(--bad);}
+.ribbon .rc.past{opacity:.30;}
+.ribbon .rc.night{filter:brightness(.5) saturate(.6);}
+.ribbon .rc.now{outline:2px solid var(--ink);outline-offset:1px;
+  border-radius:4px;position:relative;z-index:1;}
+.ribbon-ax{display:flex;justify-content:space-between;color:var(--faint);
+  font-size:10.5px;font-variant-numeric:tabular-nums;margin-bottom:10px;}
+.suninfo{display:flex;gap:14px;color:var(--muted);font-size:12.5px;
+  margin:0 0 14px;font-variant-numeric:tabular-nums;}
+
+/* Windrichtungs-Pfeil in der Boeen-Kachel */
+.wind{display:inline-flex;align-items:center;gap:3px;font-weight:400;
+  color:var(--muted);font-size:12px;margin-left:3px;}
+.warr{width:13px;height:13px;flex:none;}
+
+/* 7-Tage-Ausblick */
+.week{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;
+  -webkit-overflow-scrolling:touch;}
+.wk{flex:1 0 62px;min-width:62px;background:var(--card);border:1px solid var(--line);
+  border-radius:12px;padding:10px 6px 9px;text-align:center;}
+.wk__d{font-size:12px;font-weight:600;color:var(--muted);}
+.wk__ic{display:flex;justify-content:center;margin:6px 0 4px;}
+.wk__ic .wx{width:30px;height:30px;}
+.wk__t{font-size:14px;font-weight:600;font-variant-numeric:tabular-nums;}
+.wk__t span{color:var(--muted);font-weight:400;margin-left:3px;}
+.wk__p{font-size:11px;color:#9ec5f4;margin-top:3px;font-variant-numeric:tabular-nums;}
+
 /* Fuss */
 .foot{border-top:1px solid var(--line);margin-top:8px;padding-top:16px;
   color:var(--faint);font-size:12.5px;line-height:1.7;}
@@ -564,6 +703,137 @@ def wx_svg(kind: str) -> str:
     return f'<span class="wx">{WX_SVG.get(kind, WX_SVG["cloudy"])}</span>'
 
 
+def _wind_arrow(deg_from: float) -> str:
+    """Kleiner Pfeil, gedreht in die Richtung, in die der Wind weht (+ Kompass,
+    aus welcher Richtung er kommt)."""
+    to = (deg_from + 180) % 360
+    svg = (f'<svg class="warr" viewBox="0 0 16 16" '
+           f'style="transform:rotate({to:.0f}deg)">'
+           '<path d="M8 2.5 L8 13 M8 2.5 L4.8 6.3 M8 2.5 L11.2 6.3" '
+           'stroke="#9ec5f4" stroke-width="1.7" fill="none" '
+           'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+    return f'<span class="wind">{svg}{_compass(deg_from)}</span>'
+
+
+def _dur(mins: int) -> str:
+    if mins < 60:
+        return f"{mins} Min"
+    h, mm = divmod(mins, 60)
+    return f"{h} Std" if mm == 0 else f"{h} Std {mm} Min"
+
+
+def _banner(icon: str, title: str, value: str, tone: str = "good") -> str:
+    col = {"good": "var(--good)", "warn": "var(--warn)", "bad": "var(--bad)"}[tone]
+    return f"""
+      <div class="best" style="border-left-color:{col}">
+        <span class="best__ic">{icon}</span>
+        <div>
+          <div class="best__t">{title}</div>
+          <div class="best__v">{value}</div>
+        </div>
+      </div>"""
+
+
+def _now_next_banner(day: dict, now: datetime) -> str:
+    """Heute: aktuelles Fenster hervorheben bzw. Countdown zum naechsten guten."""
+    windows = day["windows"]
+    cur = now.hour * 60 + now.minute
+
+    def start(w): return w["start_hour"] * 60
+    def end(w): return (w["end_hour"] + 1) * 60
+
+    current = next((w for w in windows if start(w) <= cur < end(w)), None)
+    if current and current["rating"] == GUT:
+        return _banner("🐾", "Jetzt gute Zeit",
+                       f"noch {_dur(end(current) - cur)} "
+                       f"(bis {current['end_hour']+1:02d} Uhr)", "good")
+    nxt = next((w for w in windows if w["rating"] == GUT and start(w) > cur), None)
+    if nxt:
+        return _banner("⏳", "Nächstes gutes Fenster",
+                       f"{_time_range(nxt)} — in {_dur(start(nxt) - cur)}", "good")
+    if current and current["rating"] == MITTEL:
+        return _banner("👍", "Jetzt geht es",
+                       f"Mittel bis {current['end_hour']+1:02d} Uhr", "warn")
+    nxt_m = next((w for w in windows if w["rating"] == MITTEL and start(w) > cur), None)
+    if nxt_m:
+        return _banner("👍", "Nur mittlere Fenster",
+                       f"nächstes {_time_range(nxt_m)} — in {_dur(start(nxt_m) - cur)}",
+                       "warn")
+    return _banner("🚫", "Kein gutes Fenster mehr heute",
+                   "Morgen früh wieder schauen", "bad")
+
+
+def _ribbon_html(day: dict, cfg: dict) -> str:
+    """Farbstreifen ueber den ganzen Gassi-Tag; Vergangenheit blass, Nacht
+    abgedunkelt, aktuelle Stunde markiert."""
+    wh = cfg["walk_hours"]
+    by_hour = {h["hour"]: h for h in day["hours_all"]}
+    sr = day["sunrise"].hour if day.get("sunrise") else None
+    ss = day["sunset"].hour if day.get("sunset") else None
+    cells = ""
+    for hr in range(wh["start"], wh["end"] + 1):
+        h = by_hour.get(hr)
+        cls = ["rc"]
+        if h:
+            cls.append(h["rating"])
+            if h["past"]:
+                cls.append("past")
+            if h["is_now"]:
+                cls.append("now")
+            title = f"{hr:02d} Uhr — {LABEL[h['rating']]}"
+        else:
+            title = f"{hr:02d} Uhr"
+        if sr is not None and (hr < sr or hr >= ss):
+            cls.append("night")
+        cells += f'<span class="{" ".join(cls)}" title="{title}"></span>'
+    span = wh["end"] - wh["start"]
+    ticks = [wh["start"], wh["start"] + round(span / 3),
+             wh["start"] + round(2 * span / 3), wh["end"] + 1]
+    ax = "".join(f"<span>{t:02d}</span>" for t in ticks)
+    return f'<div class="ribbon">{cells}</div><div class="ribbon-ax">{ax}</div>'
+
+
+def _suninfo_html(day: dict) -> str:
+    if not day.get("sunrise_str"):
+        return ""
+    return (f'<div class="suninfo"><span>🌅 {day["sunrise_str"]} Uhr</span>'
+            f'<span>🌇 {day["sunset_str"]} Uhr</span></div>')
+
+
+def _rain_outlook_html(outlook) -> str:
+    if not outlook:
+        return ""
+    kind, dt = outlook
+    hhmm = dt.strftime("%H:%M") if dt else ""
+    text = {
+        "rain_soon": f"🌧️ Nächster Regen gegen {hhmm} Uhr",
+        "dry_soon":  f"🌤️ Regenpause ab etwa {hhmm} Uhr",
+        "rain_hold": "🌧️ Regen hält vorerst an",
+        "dry":       "✅ Kein Regen in den nächsten Stunden",
+    }[kind]
+    return f'<div class="outlook">{text}</div>'
+
+
+def _week_html(week: list[dict]) -> str:
+    if not week:
+        return ""
+    cols = "".join(
+        f'<div class="wk"><div class="wk__d">{wd["abbr"]}</div>'
+        f'<div class="wk__ic">{wx_svg(wd["kind"])}</div>'
+        f'<div class="wk__t">{wd["tmax"]}°<span>{wd["tmin"]}°</span></div>'
+        f'<div class="wk__p">💧{wd["prob"]}%</div></div>'
+        for wd in week
+    )
+    return f"""
+    <section class="day">
+      <div class="day-head">
+        <h2 class="day-label">7 Tage</h2>
+        <span class="day-date">Ausblick</span>
+      </div>
+      <div class="week">{cols}</div>
+    </section>"""
+
+
 def _time_range(w: dict) -> str:
     if w["start_hour"] == w["end_hour"]:
         return f"{w['start_hour']:02d} Uhr"
@@ -592,7 +862,7 @@ def _card_html(w: dict) -> str:
         <div class="metrics">
           <div class="metric"><span class="metric__v">{temp}C{feels}</span><span class="metric__k">Temperatur</span></div>
           <div class="metric"><span class="metric__v">{w['rain_max']} %</span><span class="metric__k">Regen</span></div>
-          <div class="metric"><span class="metric__v">{w['gust_max']} km/h</span><span class="metric__k">Böen</span></div>
+          <div class="metric"><span class="metric__v">{w['gust_max']} km/h{_wind_arrow(w['wind_dir'])}</span><span class="metric__k">Böen</span></div>
           <div class="metric"><span class="metric__v">{w['cloud_avg']} %</span><span class="metric__k">Wolken</span></div>
         </div>
         {badges_block}
@@ -601,40 +871,28 @@ def _card_html(w: dict) -> str:
 
 def _best_banner(day: dict) -> str:
     best = day["best"]
-    if best and best["rating"] in (GUT, MITTEL):
-        cls = "" if best["rating"] == GUT else ' style="border-left-color:var(--warn)"'
-        ic = "🐾" if best["rating"] == GUT else "👍"
-        return f"""
-      <div class="best"{cls}>
-        <span class="best__ic">{ic}</span>
-        <div>
-          <div class="best__t">Beste Zeit</div>
-          <div class="best__v">{_time_range(best)}</div>
-        </div>
-      </div>"""
-    return """
-      <div class="best best--none">
-        <span class="best__ic">🚫</span>
-        <div>
-          <div class="best__t">Beste Zeit</div>
-          <div class="best__v">Heute kein gutes Fenster — kurz halten</div>
-        </div>
-      </div>"""
+    if best and best["rating"] == GUT:
+        return _banner("🐾", "Beste Zeit", _time_range(best), "good")
+    if best and best["rating"] == MITTEL:
+        return _banner("👍", "Beste Zeit", _time_range(best), "warn")
+    return _banner("🚫", "Beste Zeit", "Kein gutes Fenster — kurz halten", "bad")
 
 
-def _day_html(day: dict) -> str:
-    if not day["windows"]:
-        cards = '<p class="sub">Keine Vorhersagedaten im Gassi-Zeitfenster.</p>'
-        banner = ""
-    else:
+def _day_html(day: dict, cfg: dict, now: datetime) -> str:
+    banner = _now_next_banner(day, now) if day["is_today"] else _best_banner(day)
+    if day["windows"]:
         cards = "".join(_card_html(w) for w in day["windows"])
-        banner = _best_banner(day)
+    else:
+        cards = ('<p class="sub">Keine weiteren Fenster heute '
+                 'im Gassi-Zeitfenster.</p>')
     return f"""
     <section class="day">
       <div class="day-head">
         <h2 class="day-label">{day['label']}</h2>
         <span class="day-date">{day['weekday']}, {day['date_str']}</span>
       </div>
+      {_ribbon_html(day, cfg)}
+      {_suninfo_html(day)}
       {banner}
       <div class="cards">{cards}</div>
     </section>"""
@@ -741,10 +999,11 @@ def write_icons(out_dir: Path) -> None:
         json.dumps(MANIFEST, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def build_html(days: list[dict], cfg: dict, now: datetime) -> str:
+def build_html(days: list[dict], cfg: dict, now: datetime,
+               outlook=None, week=None) -> str:
     loc = cfg["location"]["name"]
     stand = now.strftime("%d.%m.%Y, %H:%M Uhr")
-    days_html = "".join(_day_html(d) for d in days)
+    days_html = "".join(_day_html(d, cfg, now) for d in days)
     wh = cfg["walk_hours"]
     return f"""<!doctype html>
 <html lang="de">
@@ -770,7 +1029,11 @@ def build_html(days: list[dict], cfg: dict, now: datetime) -> str:
     <span class="lg"><span class="dot" style="background:var(--bad)"></span>Schlecht</span>
   </div>
 
+  {_rain_outlook_html(outlook)}
+
   {days_html}
+
+  {_week_html(week or [])}
 
   <footer class="foot">
     Gassi-Zeiten {wh['start']}–{wh['end']} Uhr &middot;
@@ -852,10 +1115,15 @@ def main() -> int:
     print(f"Ziehe Wetter für {CONFIG['location']['name']} ...")
     try:
         data = fetch_weather(CONFIG)
+        daily = parse_daily(data, CONFIG, now)
+        daily_by_date = {x["date"]: x for x in daily}
         hours = [rate_hour(h, CONFIG) for h in parse_hours(data, CONFIG, now)]
-        days = group_days(hours, now)
-        print(f"  {len(hours)} Gassi-Stunden, {len(days)} Tage aufbereitet.")
-        out_file.write_text(build_html(days, CONFIG, now), encoding="utf-8")
+        days = group_days(hours, CONFIG, now, daily_by_date)
+        outlook = parse_rain_outlook(data, CONFIG, now)
+        print(f"  {len(hours)} Gassi-Stunden, {len(days)} Detailtage, "
+              f"{len(daily)} Tage im Ausblick.")
+        out_file.write_text(
+            build_html(days, CONFIG, now, outlook, daily), encoding="utf-8")
         print(f"OK: {out_file} geschrieben.")
     except Exception as e:  # noqa: BLE001  (API/Parsing-Ausfall -> Notseite)
         print(f"FEHLER: {e}\n  -> schreibe Fallback-Seite.", file=sys.stderr)
