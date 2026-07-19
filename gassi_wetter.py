@@ -111,20 +111,19 @@ WX_WET     = {51, 53, 55, 61, 63, 65,       # Niesel + Regen (fuer Glaette-Kombi
               80, 81, 82}
 
 
-def wx_info(code: int) -> tuple[str, int, str]:
-    """WMO-Code -> (Emoji-Icon, Schweregrad, Kurztext). Schweregrad dient dazu,
-    je Fenster das relevanteste (schlimmste) Icon zu waehlen."""
+def wx_info(code: int) -> tuple[str, int]:
+    """WMO-Code -> (Icon-Art, Schweregrad). Die Art waehlt das animierte SVG;
+    der Schweregrad bestimmt, welches Icon ein Fenster praegt (schlimmste Stunde)."""
     c = int(code)
-    if c in WX_THUNDER:        return ("⛈️", 6, "Gewitter")
-    if c in WX_SNOW:           return ("🌨️", 5, "Schnee")
-    if c in WX_FREEZE:         return ("🧊", 5, "Glatteis")
-    if c in {61, 63, 65, 80, 81, 82}: return ("🌧️", 4, "Regen")
-    if c in {51, 53, 55}:      return ("🌦️", 3, "Niesel")
-    if c in WX_FOG:            return ("🌫️", 2, "Nebel")
-    if c == 3:                 return ("☁️", 1, "Bewoelkt")
-    if c == 2:                 return ("⛅", 1, "Wolkig")
-    if c == 1:                 return ("🌤️", 0, "Heiter")
-    return ("☀️", 0, "Klar")   # 0 = klarer Himmel
+    if c in WX_THUNDER:               return ("thunder", 6)
+    if c in WX_SNOW:                  return ("snow", 5)
+    if c in WX_FREEZE:                return ("snow", 5)   # Glatteis
+    if c in {61, 63, 65, 80, 81, 82}: return ("rain", 4)
+    if c in {51, 53, 55}:             return ("rain", 3)   # Niesel
+    if c in WX_FOG:                   return ("fog", 2)
+    if c == 3:                        return ("cloudy", 1)
+    if c == 2:                        return ("partly", 1)
+    return ("clear", 0)               # 0/1 = klar bis heiter
 
 
 # ---------------------------------------------------------------------------
@@ -214,8 +213,8 @@ def rate_hour(h: dict, cfg: dict) -> dict:
     penalty = 0.0
     badges: list[str] = []
 
-    # Wetter-Icon + Schweregrad (fuer die Fenster-Darstellung).
-    h["wx_icon"], h["wx_sev"], _ = wx_info(code)
+    # Wetter-Icon-Art + Schweregrad (fuer die Fenster-Darstellung).
+    h["wx_kind"], h["wx_sev"] = wx_info(code)
 
     # --- Harte Ausschluesse per Wettercode ---
     if code in WX_THUNDER:
@@ -322,7 +321,7 @@ def _new_window(h: dict) -> dict:
         "penalties": [h["penalty"]],
         "badges": list(h["badges"]),
         "sev": h["wx_sev"],
-        "icon": h["wx_icon"],
+        "kind": h["wx_kind"],
     }
 
 
@@ -335,7 +334,7 @@ def _extend_window(w: dict, h: dict) -> None:
     w["gusts"].append(h["gust"])
     w["penalties"].append(h["penalty"])
     if h["wx_sev"] > w["sev"]:          # schlimmstes Wetter praegt das Icon
-        w["sev"], w["icon"] = h["wx_sev"], h["wx_icon"]
+        w["sev"], w["kind"] = h["wx_sev"], h["wx_kind"]
     for b in h["badges"]:
         # Nur eine Auspraegung je Hinweis-Typ (erstes Emoji als Schluessel)
         key = b.split(" ")[0]
@@ -458,7 +457,23 @@ body{background:var(--paper);color:var(--ink);font-family:var(--sans);
 .card__time{display:flex;align-items:center;gap:9px;
   font-family:var(--serif);font-weight:600;font-size:22px;
   font-variant-numeric:tabular-nums;letter-spacing:-.01em;}
-.wx{font-size:22px;line-height:1;font-family:var(--sans);}
+.wx{width:26px;height:26px;flex:none;display:inline-flex;}
+.wx svg{width:100%;height:100%;overflow:visible;}
+.wx .spin{transform-origin:center;}
+@media (prefers-reduced-motion:no-preference){
+  .wx .spin{animation:wxspin 16s linear infinite;}
+  .wx .drift{animation:wxdrift 3.6s ease-in-out infinite;}
+  .wx .drop{animation:wxdrop 1.3s linear infinite;}
+  .wx .flake{animation:wxflake 2.6s linear infinite;}
+  .wx .fog{animation:wxfog 3.4s ease-in-out infinite;}
+  .wx .bolt{animation:wxbolt 2.4s steps(1,end) infinite;}
+}
+@keyframes wxspin{to{transform:rotate(360deg);}}
+@keyframes wxdrift{0%,100%{transform:translateX(-1px);}50%{transform:translateX(1.2px);}}
+@keyframes wxdrop{0%{transform:translateY(-2px);opacity:0;}25%{opacity:1;}100%{transform:translateY(5px);opacity:0;}}
+@keyframes wxflake{0%{transform:translateY(-2px);opacity:0;}25%{opacity:1;}100%{transform:translateY(6px);opacity:0;}}
+@keyframes wxfog{0%,100%{transform:translateX(-1.5px);}50%{transform:translateX(1.5px);}}
+@keyframes wxbolt{0%,88%,100%{opacity:.2;}90%,96%{opacity:1;}}
 .pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;
   padding:3px 10px;border-radius:999px;white-space:nowrap;}
 .card.gut .pill{background:color-mix(in srgb,var(--good) 22%,transparent);color:var(--good-ink);}
@@ -483,6 +498,73 @@ body{background:var(--paper);color:var(--ink);font-family:var(--sans);
 """
 
 
+# ---------------------------------------------------------------------------
+# ANIMIERTE WETTER-ICONS (inline SVG + CSS-Keyframes, keine Library)
+# Bewegung nur bei prefers-reduced-motion: no-preference (Barrierefreiheit).
+# ---------------------------------------------------------------------------
+_SUN_RAYS = ('<g class="spin"{o} stroke="#fab219" stroke-width="{sw}" '
+             'stroke-linecap="round">'
+             '<line x1="{cx}" y1="{t}" x2="{cx}" y2="{t2}"/>'
+             '<line x1="{cx}" y1="{b2}" x2="{cx}" y2="{b}"/>'
+             '<line x1="{t}" y1="{cy}" x2="{t2}" y2="{cy}"/>'
+             '<line x1="{b2}" y1="{cy}" x2="{b}" y2="{cy}"/>'
+             '<line x1="{d1}" y1="{d1}" x2="{d2}" y2="{d2}"/>'
+             '<line x1="{d3}" y1="{d3}" x2="{d4}" y2="{d4}"/>'
+             '<line x1="{d3}" y1="{d1}" x2="{d4}" y2="{d2}"/>'
+             '<line x1="{d1}" y1="{d3}" x2="{d2}" y2="{d4}"/></g>')
+
+_CLOUD = ('<g class="drift" fill="{c}"><circle cx="9" cy="13" r="4"/>'
+          '<circle cx="14" cy="11" r="5"/><circle cx="17.5" cy="14" r="3.5"/>'
+          '<rect x="8" y="12.5" width="10" height="5.5" rx="2.7"/></g>')
+
+WX_SVG = {
+    "clear": '<svg viewBox="0 0 24 24">' + _SUN_RAYS.format(
+        o='', sw=2, cx=12, cy=12, t=2, t2=4.6, b2=19.4, b=22,
+        d1=5, d2=6.8, d3=19, d4=17.2) +
+        '<circle cx="12" cy="12" r="5" fill="#fab219"/></svg>',
+
+    "partly": ('<svg viewBox="0 0 24 24">' + _SUN_RAYS.format(
+        o=' style="transform-origin:8px 8px"', sw=1.5, cx=8, cy=8,
+        t=1.5, t2=3.4, b2=12.6, b=14.5, d1=3.4, d2=4.7, d3=12.6, d4=11.3) +
+        '<circle cx="8" cy="8" r="3.2" fill="#fab219"/>'
+        '<g class="drift" fill="#cfc8be"><circle cx="12.5" cy="16" r="3.6"/>'
+        '<circle cx="16.5" cy="14.5" r="4.4"/>'
+        '<rect x="11.5" y="16" width="8.5" height="4.6" rx="2.3"/></g></svg>'),
+
+    "cloudy": '<svg viewBox="0 0 24 24">' + _CLOUD.format(c="#cfc8be") + '</svg>',
+
+    "fog": ('<svg viewBox="0 0 24 24">'
+            '<g class="drift" fill="#cfc8be" opacity=".65">'
+            '<circle cx="9" cy="10" r="3.6"/><circle cx="14" cy="8.5" r="4.4"/>'
+            '<rect x="8" y="9.5" width="9" height="4.2" rx="2"/></g>'
+            '<g stroke="#b9b2a7" stroke-width="1.8" stroke-linecap="round">'
+            '<line class="fog" x1="5" y1="17" x2="19" y2="17"/>'
+            '<line class="fog" style="animation-delay:.5s" x1="6.5" y1="20" '
+            'x2="17.5" y2="20"/></g></svg>'),
+
+    "rain": ('<svg viewBox="0 0 24 24">' + _CLOUD.format(c="#c3bcb2") +
+             '<g stroke="#6db3f2" stroke-width="2" stroke-linecap="round">'
+             '<line class="drop" x1="9.5" y1="18.5" x2="9.5" y2="21"/>'
+             '<line class="drop" style="animation-delay:.45s" x1="13.5" y1="18.5" x2="13.5" y2="21"/>'
+             '<line class="drop" style="animation-delay:.9s" x1="16.5" y1="18.5" x2="16.5" y2="21"/>'
+             '</g></svg>'),
+
+    "snow": ('<svg viewBox="0 0 24 24">' + _CLOUD.format(c="#c3bcb2") +
+             '<g fill="#e6eefb"><circle class="flake" cx="9.5" cy="19.5" r="1.2"/>'
+             '<circle class="flake" style="animation-delay:.7s" cx="13.5" cy="19.5" r="1.2"/>'
+             '<circle class="flake" style="animation-delay:1.3s" cx="16.5" cy="19.5" r="1.2"/>'
+             '</g></svg>'),
+
+    "thunder": ('<svg viewBox="0 0 24 24">' + _CLOUD.format(c="#a9a297") +
+                '<polygon class="bolt" points="12.5,15 9,20 11.6,20 10.4,24 '
+                '15.5,18 12.4,18" fill="#fac800"/></svg>'),
+}
+
+
+def wx_svg(kind: str) -> str:
+    return f'<span class="wx">{WX_SVG.get(kind, WX_SVG["cloudy"])}</span>'
+
+
 def _time_range(w: dict) -> str:
     if w["start_hour"] == w["end_hour"]:
         return f"{w['start_hour']:02d} Uhr"
@@ -505,7 +587,7 @@ def _card_html(w: dict) -> str:
     return f"""
       <article class="card {w['rating']}">
         <div class="card__top">
-          <div class="card__time"><span class="wx">{w['icon']}</span>{_time_range(w)}</div>
+          <div class="card__time">{wx_svg(w['kind'])}{_time_range(w)}</div>
           <span class="pill"><span class="dot" style="background:var(--c)"></span>{LABEL[w['rating']]}</span>
         </div>
         <div class="metrics">
@@ -729,7 +811,7 @@ def build_fallback_html(cfg: dict, now: datetime, err: str) -> str:
   </header>
   <article class="card schlecht">
     <div class="card__top">
-      <div class="card__time"><span class="wx">📡</span>Keine Daten</div>
+      <div class="card__time"><span style="font-size:22px">📡</span> Keine Daten</div>
     </div>
     <p class="sub" style="margin-top:10px">
       Die Wetterdaten sind gerade nicht abrufbar. Der nächste automatische
