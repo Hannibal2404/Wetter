@@ -1,0 +1,11 @@
+# Erzeugte Ausgabe (wird im Workflow frisch gebaut)
+public/
+dist/
+out/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor / Tooling
+.claude/

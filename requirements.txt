@@ -1,0 +1,2 @@
+httpx
+tzdata; platform_system == "Windows"

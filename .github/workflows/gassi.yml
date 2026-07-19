@@ -1,0 +1,53 @@
+name: Gassi-Wetter
+
+on:
+  schedule:
+    # Taeglich 04:00 UTC ~= 06:00 deutsche Zeit (+-1 h je Sommer-/Winterzeit).
+    - cron: "0 4 * * *"
+  workflow_dispatch: {}   # manuell ausloesbar (Actions-Tab -> Run workflow)
+
+# Rechte fuer den offiziellen GitHub-Pages-Deploy (kein PAT noetig).
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Nie zwei Deploys gleichzeitig; laufende Runs nicht abbrechen.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code auschecken
+        uses: actions/checkout@v4
+
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Abhaengigkeiten installieren
+        run: pip install -r requirements.txt
+
+      - name: Dashboard bauen
+        run: python gassi_wetter.py --out ./public
+
+      - name: Pages-Artefakt hochladen
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Auf GitHub Pages veroeffentlichen
+        id: deployment
+        uses: actions/deploy-pages@v4
