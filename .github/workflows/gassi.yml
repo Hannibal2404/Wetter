@@ -2,8 +2,11 @@ name: Gassi-Wetter
 
 on:
   schedule:
-    # Taeglich 04:00 UTC ~= 06:00 deutsche Zeit (+-1 h je Sommer-/Winterzeit).
+    # 2x taeglich (UTC). ~06:00 DE morgens + ~14:00 DE frueher Nachmittag,
+    # damit sich aendernde Vorhersagen (Schauer/Boeen) tagsueber aktualisiert werden.
+    # (+-1 h je Sommer-/Winterzeit.)
     - cron: "0 4 * * *"
+    - cron: "0 12 * * *"
   push:
     branches: [main]        # jeder Push auf main baut + deployt automatisch
   workflow_dispatch: {}   # manuell ausloesbar (Actions-Tab -> Run workflow)

@@ -235,17 +235,17 @@ def rate_hour(h: dict, cfg: dict) -> dict:
     elif h["rain_prob"] >= rain["prob_ok"]:
         rating = _worse(rating, MITTEL)
         if not any(b[0] in "⛈🌨🧊🌧" for b in badges):
-            badges.append("🌦️ Schauer moeglich")
+            badges.append("🌦️ Schauer möglich")
     penalty += h["rain_prob"] + h["rain_mm"] * 30
 
     # --- Hitze (Lufttemperatur als Asphalt-Naeherung) ---
     if h["temp"] >= heat["bad"]:
         rating = _worse(rating, SCHLECHT)
-        badges.append("🌡️ Asphalt zu heiss")
+        badges.append("🌡️ Asphalt zu heiß")
         penalty += (h["temp"] - heat["warn"]) * 4 + 30
     elif h["temp"] >= heat["warn"]:
         rating = _worse(rating, MITTEL)
-        badges.append("🌡️ Warm — Pfoten pruefen")
+        badges.append("🌡️ Warm — Pfoten prüfen")
         penalty += (h["temp"] - heat["warn"]) * 4
 
     # --- Kaelte (gefuehlte Temperatur / Windchill) ---
@@ -255,7 +255,7 @@ def rate_hour(h: dict, cfg: dict) -> dict:
         penalty += (cold["warn"] - h["feels"]) * 3 + 20
     elif h["feels"] <= cold["warn"]:
         rating = _worse(rating, MITTEL)
-        badges.append("🥶 Kalt — Pfoten schuetzen")
+        badges.append("🥶 Kalt — Pfoten schützen")
         penalty += (cold["warn"] - h["feels"]) * 3
 
     # --- Glaette (Frost + Naesse/Schnee), falls nicht schon Glatteis-Code ---
@@ -263,17 +263,17 @@ def rate_hour(h: dict, cfg: dict) -> dict:
             and (h["rain_mm"] > 0 or code in WX_SNOW or code in WX_WET):
         rating = _worse(rating, MITTEL)
         if not any(b[0] == "🧊" for b in badges):
-            badges.append("🧊 Glaettegefahr")
+            badges.append("🧊 Glättegefahr")
         penalty += 15
 
     # --- Wind / Boeen ---
     if h["gust"] >= wind["gust_bad"]:
         rating = _worse(rating, SCHLECHT)
-        badges.append("💨 Sturmboeen")
+        badges.append("💨 Sturmböen")
         penalty += (h["gust"] - wind["gust_warn"]) * 1.5 + 15
     elif h["gust"] >= wind["gust_warn"]:
         rating = _worse(rating, MITTEL)
-        badges.append("💨 Boeig")
+        badges.append("💨 Böig")
         penalty += (h["gust"] - wind["gust_warn"]) * 1.5
 
     # --- Pralle Sonne (Zusatz-Hinweis, verschlechtert nicht allein) ---
@@ -698,8 +698,8 @@ def build_html(days: list[dict], cfg: dict, now: datetime) -> str:
     Böen ab {cfg['wind']['gust_warn']} km/h &middot;
     Regen ab {cfg['rain']['prob_bad']} % &middot;
     Gewitter/Schnee/Glatteis = Ausschluss<br>
-    Wetterdaten: <a href="https://open-meteo.com/">Open-Meteo</a> (kostenlos, ohne Gewaehr) &middot;
-    Automatische Aktualisierung taeglich am Morgen.
+    Wetterdaten: <a href="https://open-meteo.com/">Open-Meteo</a> (kostenlos, ohne Gewähr) &middot;
+    Automatische Aktualisierung morgens &amp; am frühen Nachmittag.
   </footer>
 </body>
 </html>"""
@@ -732,12 +732,12 @@ def build_fallback_html(cfg: dict, now: datetime, err: str) -> str:
       <div class="card__time"><span class="wx">📡</span>Keine Daten</div>
     </div>
     <p class="sub" style="margin-top:10px">
-      Die Wetterdaten sind gerade nicht abrufbar. Der naechste automatische
-      Lauf am Morgen versucht es erneut &mdash; einfach spaeter neu laden.
+      Die Wetterdaten sind gerade nicht abrufbar. Der nächste automatische
+      Lauf versucht es erneut &mdash; einfach später neu laden.
     </p>
   </article>
   <footer class="foot">
-    Wetterdaten: <a href="https://open-meteo.com/">Open-Meteo</a> voruebergehend
+    Wetterdaten: <a href="https://open-meteo.com/">Open-Meteo</a> vorübergehend
     nicht erreichbar.<br>Details: {html.escape(err)[:200]}
   </footer>
 </body>
