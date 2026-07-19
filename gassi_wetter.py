@@ -29,6 +29,7 @@ import argparse
 import html
 import json
 import math
+import os
 import sys
 import time
 from datetime import datetime, timedelta
@@ -86,6 +87,9 @@ CONFIG = {
     "days": 2,       # detaillierte Tage mit Karten (heute + morgen)
     "week_days": 7,  # kompakter Wochen-Ausblick unten
     "rain_horizon_h": 6,  # Vorausschau fuer den Naechster-Regen-Hinweis (Std)
+
+    # Oeffentliche Adresse der Web-App (fuer den Klick in der Push-Nachricht).
+    "site_url": "https://hannibal2404.github.io/Wetter/",
 }
 
 # API
@@ -1089,6 +1093,68 @@ def build_fallback_html(cfg: dict, now: datetime, err: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# PUSH-BENACHRICHTIGUNG (ntfy)  --  optional, nur beim Morgen-Lauf
+# Topic kommt aus dem Secret NTFY_TOPIC (NICHT im oeffentlichen Code!).
+# Aktiv nur, wenn GASSI_NOTIFY=1 gesetzt ist (Workflow steuert das).
+# ---------------------------------------------------------------------------
+def _range_ascii(w: dict) -> str:
+    """Uhrzeit-Range ohne Sonderzeichen (HTTP-Header muessen ASCII/latin-1 sein)."""
+    if w["start_hour"] == w["end_hour"]:
+        return f"{w['start_hour']:02d} Uhr"
+    return f"{w['start_hour']:02d}-{w['end_hour'] + 1:02d} Uhr"
+
+
+def _notify_content(day: dict) -> tuple[str, str, str]:
+    """(Titel [ASCII], Text [UTF-8], ntfy-Tags) fuer die Morgen-Nachricht."""
+    best = day["best"]
+    if best and best["rating"] == GUT:
+        return (
+            f"Gassi heute: {_range_ascii(best)}",
+            f"Beste Zeit {_time_range(best)} — {best['temp_min']}–{best['temp_max']} °C, "
+            f"Regen max {best['rain_max']} %, Böen {best['gust_max']} km/h",
+            "dog2,white_check_mark",
+        )
+    if best and best["rating"] == MITTEL:
+        return (
+            f"Gassi heute: {_range_ascii(best)} (mittel)",
+            f"Bestes Fenster {_time_range(best)} — {best['temp_min']}–{best['temp_max']} °C, "
+            f"Regen max {best['rain_max']} %, Böen {best['gust_max']} km/h",
+            "dog2",
+        )
+    return ("Heute kein gutes Gassi-Fenster",
+            "Nur kurze Runden — Wetter meiden. Details in der App.",
+            "dog2,umbrella")
+
+
+def send_ntfy(day: dict, cfg: dict) -> None:
+    """Schickt die Morgen-Zusammenfassung als Push an ntfy. Best-effort:
+    Fehler brechen den Build nie ab."""
+    topic = os.environ.get("NTFY_TOPIC")
+    if not topic:
+        print("Hinweis: NTFY_TOPIC nicht gesetzt -> keine Push-Nachricht.",
+              file=sys.stderr)
+        return
+    server = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
+    title, body, tags = _notify_content(day)
+    try:
+        r = httpx.post(
+            f"{server}/{topic}",
+            content=body.encode("utf-8"),
+            headers={
+                "Title": title,                 # ASCII
+                "Tags": tags,                   # ASCII
+                "Click": cfg.get("site_url", ""),
+                "User-Agent": USER_AGENT,
+            },
+            timeout=15,
+        )
+        r.raise_for_status()
+        print(f"OK: Push an {server}/<topic> gesendet.")
+    except Exception as e:  # noqa: BLE001  (Push ist best-effort)
+        print(f"Warnung: Push fehlgeschlagen: {e}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 def main() -> int:
@@ -1125,6 +1191,12 @@ def main() -> int:
         out_file.write_text(
             build_html(days, CONFIG, now, outlook, daily), encoding="utf-8")
         print(f"OK: {out_file} geschrieben.")
+
+        # Morgen-Push nur, wenn der Workflow es anfordert (GASSI_NOTIFY=1).
+        if os.environ.get("GASSI_NOTIFY") == "1":
+            today = next((d for d in days if d["is_today"]), None)
+            if today:
+                send_ntfy(today, CONFIG)
     except Exception as e:  # noqa: BLE001  (API/Parsing-Ausfall -> Notseite)
         print(f"FEHLER: {e}\n  -> schreibe Fallback-Seite.", file=sys.stderr)
         out_file.write_text(build_fallback_html(CONFIG, now, str(e)),

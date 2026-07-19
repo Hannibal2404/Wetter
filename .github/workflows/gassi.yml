@@ -38,7 +38,12 @@ jobs:
       - name: Abhaengigkeiten installieren
         run: pip install -r requirements.txt
 
-      - name: Dashboard bauen
+      - name: Dashboard bauen (+ Morgen-Push beim 06:00-Lauf / manuell)
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          # Push nur beim Morgen-Cron (04:00 UTC) oder manuellem Lauf zum Testen;
+          # der Nachmittags-Cron und Pushs deployen still.
+          GASSI_NOTIFY: ${{ (github.event.schedule == '0 4 * * *' || github.event_name == 'workflow_dispatch') && '1' || '' }}
         run: python gassi_wetter.py --out ./public
 
       - name: Pages-Artefakt hochladen
