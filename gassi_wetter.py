@@ -9,7 +9,10 @@ ein mobiles HTML-Dashboard (index.html) im Magazin-Stil.
 
 Zu vermeiden:
   - Regen (Wahrscheinlichkeit + Menge)
+  - Gewitter / Schnee / Glatteis (Wettercode -> harter Ausschluss)
   - Hitze (Lufttemperatur als Naeherung für heissen Asphalt; Pfotenschutz)
+  - Kaelte (gefühlte Temperatur/Windchill) + Glaettegefahr bei Frost & Naesse
+  - Wind / Sturmboeen
   - Pralle Sonne (wenig Wolken bei Tag + hoher UV) -> Extra-Hinweis
 
 Alle Schwellwerte stehen zentral in CONFIG (siehe unten) und lassen sich ohne
@@ -56,6 +59,21 @@ CONFIG = {
         "bad":  30,   # ab hier: schlecht (Asphalt zu heiss)
     },
 
+    # Kaelte: bewertet die GEFUEHLTE Temperatur (inkl. Windchill) in Grad C.
+    "cold": {
+        "warn":  0,   # ab hier abwaerts: mittel (Pfoten schuetzen)
+        "bad":  -10,  # ab hier abwaerts: schlecht (eisig, nur kurz raus)
+    },
+
+    # Glaette: ab/unter dieser Lufttemperatur (Grad C) + Naesse/Schnee -> Hinweis.
+    "glaette_temp": 1,
+
+    # Wind: Boeen in km/h.
+    "wind": {
+        "gust_warn": 45,  # ab hier: mittel (boeig)
+        "gust_bad":  60,  # ab hier: schlecht (Sturmboeen)
+    },
+
     # Pralle Sonne: wenig Wolken bei Tag -> Zusatz-Hinweis (Pfoten/Sonnenschutz).
     "sun": {
         "cloud_max": 30,  # Bewoelkung <= diesem Wert (%) gilt als "sonnig"
@@ -82,6 +100,30 @@ WOCHENTAGE = ["Montag", "Dienstag", "Mittwoch", "Donnerstag",
 MONATE = ["", "Januar", "Februar", "Maerz", "April", "Mai", "Juni", "Juli",
           "August", "September", "Oktober", "November", "Dezember"]
 
+# WMO-Wettercodes (Open-Meteo), gruppiert fuer harte Ausschluesse.
+WX_THUNDER = {95, 96, 99}                  # Gewitter (ggf. mit Hagel)
+WX_SNOW    = {71, 73, 75, 77, 85, 86}      # Schneefall / Schneeschauer
+WX_FREEZE  = {56, 57, 66, 67}              # gefrierender Niesel/Regen -> Glatteis
+WX_FOG     = {45, 48}                       # Nebel / Reifnebel
+WX_WET     = {51, 53, 55, 61, 63, 65,       # Niesel + Regen (fuer Glaette-Kombi)
+              80, 81, 82}
+
+
+def wx_info(code: int) -> tuple[str, int, str]:
+    """WMO-Code -> (Emoji-Icon, Schweregrad, Kurztext). Schweregrad dient dazu,
+    je Fenster das relevanteste (schlimmste) Icon zu waehlen."""
+    c = int(code)
+    if c in WX_THUNDER:        return ("⛈️", 6, "Gewitter")
+    if c in WX_SNOW:           return ("🌨️", 5, "Schnee")
+    if c in WX_FREEZE:         return ("🧊", 5, "Glatteis")
+    if c in {61, 63, 65, 80, 81, 82}: return ("🌧️", 4, "Regen")
+    if c in {51, 53, 55}:      return ("🌦️", 3, "Niesel")
+    if c in WX_FOG:            return ("🌫️", 2, "Nebel")
+    if c == 3:                 return ("☁️", 1, "Bewoelkt")
+    if c == 2:                 return ("⛅", 1, "Wolkig")
+    if c == 1:                 return ("🌤️", 0, "Heiter")
+    return ("☀️", 0, "Klar")   # 0 = klarer Himmel
+
 
 # ---------------------------------------------------------------------------
 # WETTER ZIEHEN
@@ -97,8 +139,10 @@ def fetch_weather(cfg: dict) -> dict:
             "apparent_temperature",
             "precipitation_probability",
             "precipitation",
+            "weather_code",
             "cloud_cover",
             "uv_index",
+            "wind_gusts_10m",
             "is_day",
         ]),
         "timezone": cfg["timezone"],
@@ -144,8 +188,10 @@ def parse_hours(data: dict, cfg: dict, now: datetime) -> list[dict]:
             "feels": _num(h["apparent_temperature"][i]),
             "rain_prob": _num(h["precipitation_probability"][i]),
             "rain_mm": _num(h["precipitation"][i]),
+            "wcode": int(_num(h["weather_code"][i])),
             "cloud": _num(h["cloud_cover"][i]),
             "uv": _num(h["uv_index"][i]),
+            "gust": _num(h["wind_gusts_10m"][i]),
             "is_day": bool(h["is_day"][i]),
         })
     return out
@@ -156,22 +202,41 @@ def _num(v, default=0.0):
 
 
 def rate_hour(h: dict, cfg: dict) -> dict:
-    """Bewertet eine Stunde -> Rang (gut/mittel/schlecht), Penalty & Hinweise."""
-    rain, heat, sun = cfg["rain"], cfg["heat"], cfg["sun"]
+    """Bewertet eine Stunde -> Rang (gut/mittel/schlecht), Penalty & Hinweise.
+    Zahlen (Temp, Regen%, Boeen) stehen in den Metrik-Kacheln; Badges bleiben
+    qualitativ, damit sie nie einem Kachelwert widersprechen."""
+    rain, heat, cold = cfg["rain"], cfg["heat"], cfg["cold"]
+    sun, wind = cfg["sun"], cfg["wind"]
+    code = h["wcode"]
     rating = GUT
     penalty = 0.0
     badges: list[str] = []
 
-    # --- Regen ---  (Prozentwert steht in der Metrik-Kachel, nicht im Badge)
+    # Wetter-Icon + Schweregrad (fuer die Fenster-Darstellung).
+    h["wx_icon"], h["wx_sev"], _ = wx_info(code)
+
+    # --- Harte Ausschluesse per Wettercode ---
+    if code in WX_THUNDER:
+        rating = SCHLECHT; badges.append("⛈️ Gewitter"); penalty += 60
+    elif code in WX_SNOW:
+        rating = SCHLECHT; badges.append("🌨️ Schnee"); penalty += 45
+    elif code in WX_FREEZE:
+        rating = SCHLECHT; badges.append("🧊 Glatteis"); penalty += 50
+    elif code in WX_FOG:
+        rating = _worse(rating, MITTEL); badges.append("🌫️ Nebel"); penalty += 10
+
+    # --- Regen ---
     if h["rain_mm"] >= rain["mm_bad"] or h["rain_prob"] >= rain["prob_bad"]:
         rating = _worse(rating, SCHLECHT)
-        badges.append("🌧️ Regen")
+        if not any(b[0] in "⛈🌨🧊" for b in badges):
+            badges.append("🌧️ Regen")
     elif h["rain_prob"] >= rain["prob_ok"]:
         rating = _worse(rating, MITTEL)
-        badges.append("🌦️ Schauer moeglich")
+        if not any(b[0] in "⛈🌨🧊🌧" for b in badges):
+            badges.append("🌦️ Schauer moeglich")
     penalty += h["rain_prob"] + h["rain_mm"] * 30
 
-    # --- Hitze (Asphalt-Naeherung; Temperatur steht in der Metrik-Kachel) ---
+    # --- Hitze (Lufttemperatur als Asphalt-Naeherung) ---
     if h["temp"] >= heat["bad"]:
         rating = _worse(rating, SCHLECHT)
         badges.append("🌡️ Asphalt zu heiss")
@@ -180,6 +245,34 @@ def rate_hour(h: dict, cfg: dict) -> dict:
         rating = _worse(rating, MITTEL)
         badges.append("🌡️ Warm — Pfoten pruefen")
         penalty += (h["temp"] - heat["warn"]) * 4
+
+    # --- Kaelte (gefuehlte Temperatur / Windchill) ---
+    if h["feels"] <= cold["bad"]:
+        rating = _worse(rating, SCHLECHT)
+        badges.append("🥶 Eisig — nur kurz raus")
+        penalty += (cold["warn"] - h["feels"]) * 3 + 20
+    elif h["feels"] <= cold["warn"]:
+        rating = _worse(rating, MITTEL)
+        badges.append("🥶 Kalt — Pfoten schuetzen")
+        penalty += (cold["warn"] - h["feels"]) * 3
+
+    # --- Glaette (Frost + Naesse/Schnee), falls nicht schon Glatteis-Code ---
+    if h["temp"] <= cfg["glaette_temp"] and code not in WX_FREEZE \
+            and (h["rain_mm"] > 0 or code in WX_SNOW or code in WX_WET):
+        rating = _worse(rating, MITTEL)
+        if not any(b[0] == "🧊" for b in badges):
+            badges.append("🧊 Glaettegefahr")
+        penalty += 15
+
+    # --- Wind / Boeen ---
+    if h["gust"] >= wind["gust_bad"]:
+        rating = _worse(rating, SCHLECHT)
+        badges.append("💨 Sturmboeen")
+        penalty += (h["gust"] - wind["gust_warn"]) * 1.5 + 15
+    elif h["gust"] >= wind["gust_warn"]:
+        rating = _worse(rating, MITTEL)
+        badges.append("💨 Boeig")
+        penalty += (h["gust"] - wind["gust_warn"]) * 1.5
 
     # --- Pralle Sonne (Zusatz-Hinweis, verschlechtert nicht allein) ---
     if h["is_day"] and h["cloud"] <= sun["cloud_max"] and h["uv"] >= sun["uv_warn"]:
@@ -220,19 +313,27 @@ def _new_window(h: dict) -> dict:
         "start_hour": h["hour"],
         "end_hour": h["hour"],
         "temps": [h["temp"]],
+        "feels": [h["feels"]],
         "rain_probs": [h["rain_prob"]],
         "clouds": [h["cloud"]],
+        "gusts": [h["gust"]],
         "penalties": [h["penalty"]],
         "badges": list(h["badges"]),
+        "sev": h["wx_sev"],
+        "icon": h["wx_icon"],
     }
 
 
 def _extend_window(w: dict, h: dict) -> None:
     w["end_hour"] = h["hour"]
     w["temps"].append(h["temp"])
+    w["feels"].append(h["feels"])
     w["rain_probs"].append(h["rain_prob"])
     w["clouds"].append(h["cloud"])
+    w["gusts"].append(h["gust"])
     w["penalties"].append(h["penalty"])
+    if h["wx_sev"] > w["sev"]:          # schlimmstes Wetter praegt das Icon
+        w["sev"], w["icon"] = h["wx_sev"], h["wx_icon"]
     for b in h["badges"]:
         # Nur eine Auspraegung je Hinweis-Typ (erstes Emoji als Schluessel)
         key = b.split(" ")[0]
@@ -244,8 +345,10 @@ def _finalize_window(w: dict) -> None:
     n = len(w["temps"])
     w["temp_min"] = round(min(w["temps"]))
     w["temp_max"] = round(max(w["temps"]))
+    w["feels_avg"] = round(sum(w["feels"]) / n)
     w["rain_max"] = int(max(w["rain_probs"]))
     w["cloud_avg"] = round(sum(w["clouds"]) / n)
+    w["gust_max"] = round(max(w["gusts"]))
     w["avg_penalty"] = sum(w["penalties"]) / n
     w["length"] = w["end_hour"] - w["start_hour"] + 1
 
@@ -350,8 +453,10 @@ body{background:var(--paper);color:var(--ink);font-family:var(--sans);
   background:color-mix(in srgb, var(--c) 9%, var(--card));}
 .card.gut{--c:var(--good);} .card.mittel{--c:var(--warn);} .card.schlecht{--c:var(--bad);}
 .card__top{display:flex;align-items:center;justify-content:space-between;gap:12px;}
-.card__time{font-family:var(--serif);font-weight:600;font-size:22px;
+.card__time{display:flex;align-items:center;gap:9px;
+  font-family:var(--serif);font-weight:600;font-size:22px;
   font-variant-numeric:tabular-nums;letter-spacing:-.01em;}
+.wx{font-size:22px;line-height:1;font-family:var(--sans);}
 .pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;
   padding:3px 10px;border-radius:999px;white-space:nowrap;}
 .card.gut .pill{background:color-mix(in srgb,var(--good) 22%,transparent);color:var(--good-ink);}
@@ -362,6 +467,7 @@ body{background:var(--paper);color:var(--ink);font-family:var(--sans);
 .metrics{display:flex;gap:18px;flex-wrap:wrap;margin-top:11px;}
 .metric{display:flex;flex-direction:column;gap:1px;}
 .metric__v{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums;}
+.metric__v .feels{font-weight:400;color:var(--muted);font-size:13px;}
 .metric__k{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);}
 
 .badges{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px;}
@@ -390,15 +496,20 @@ def _card_html(w: dict) -> str:
     badges_block = f'<div class="badges">{badges}</div>' if badges else ""
     temp = (f"{w['temp_min']}°" if w["temp_min"] == w["temp_max"]
             else f"{w['temp_min']}–{w['temp_max']}°")
+    temp_mid = round((w["temp_min"] + w["temp_max"]) / 2)
+    # Gefuehlte Temperatur nur zeigen, wenn sie spuerbar abweicht (Windchill/Schwuele).
+    feels = (f'<span class="feels"> gef. {w["feels_avg"]}°</span>'
+             if abs(w["feels_avg"] - temp_mid) >= 2 else "")
     return f"""
       <article class="card {w['rating']}">
         <div class="card__top">
-          <div class="card__time">{_time_range(w)}</div>
+          <div class="card__time"><span class="wx">{w['icon']}</span>{_time_range(w)}</div>
           <span class="pill"><span class="dot" style="background:var(--c)"></span>{LABEL[w['rating']]}</span>
         </div>
         <div class="metrics">
-          <div class="metric"><span class="metric__v">{temp} C</span><span class="metric__k">Temperatur</span></div>
+          <div class="metric"><span class="metric__v">{temp}C{feels}</span><span class="metric__k">Temperatur</span></div>
           <div class="metric"><span class="metric__v">{w['rain_max']} %</span><span class="metric__k">Regen</span></div>
+          <div class="metric"><span class="metric__v">{w['gust_max']} km/h</span><span class="metric__k">Böen</span></div>
           <div class="metric"><span class="metric__v">{w['cloud_avg']} %</span><span class="metric__k">Wolken</span></div>
         </div>
         {badges_block}
@@ -479,10 +590,52 @@ def build_html(days: list[dict], cfg: dict, now: datetime) -> str:
 
   <footer class="foot">
     Gassi-Zeiten {wh['start']}–{wh['end']} Uhr &middot;
-    Hitze-Schwelle {cfg['heat']['warn']} °C (warm) / {cfg['heat']['bad']} °C (heiss) &middot;
-    Regen-Schwelle {cfg['rain']['prob_bad']} %<br>
+    Hitze ab {cfg['heat']['warn']}°/{cfg['heat']['bad']} °C &middot;
+    Kälte ab {cfg['cold']['warn']}° (gefühlt) &middot;
+    Böen ab {cfg['wind']['gust_warn']} km/h &middot;
+    Regen ab {cfg['rain']['prob_bad']} % &middot;
+    Gewitter/Schnee/Glatteis = Ausschluss<br>
     Wetterdaten: <a href="https://open-meteo.com/">Open-Meteo</a> (kostenlos, ohne Gewaehr) &middot;
     Automatische Aktualisierung taeglich am Morgen.
+  </footer>
+</body>
+</html>"""
+
+
+def build_fallback_html(cfg: dict, now: datetime, err: str) -> str:
+    """Notseite, falls Open-Meteo nach mehreren Versuchen nicht erreichbar ist.
+    Wird deployt, damit die Live-URL nie kaputt/leer wirkt."""
+    loc = cfg["location"]["name"]
+    stand = now.strftime("%d.%m.%Y, %H:%M Uhr")
+    return f"""<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E⛅%3C/text%3E%3C/svg%3E">
+<title>Gassi-Wetter {loc}</title>
+<style>{CSS}</style>
+</head>
+<body>
+  <header class="masthead">
+    <div class="kicker">⛅ Gassi-Planer</div>
+    <h1 class="title">{loc}</h1>
+    <p class="sub">Stand {stand}</p>
+  </header>
+  <article class="card schlecht">
+    <div class="card__top">
+      <div class="card__time"><span class="wx">📡</span>Keine Daten</div>
+    </div>
+    <p class="sub" style="margin-top:10px">
+      Die Wetterdaten sind gerade nicht abrufbar. Der naechste automatische
+      Lauf am Morgen versucht es erneut &mdash; einfach spaeter neu laden.
+    </p>
+  </article>
+  <footer class="foot">
+    Wetterdaten: <a href="https://open-meteo.com/">Open-Meteo</a> voruebergehend
+    nicht erreichbar.<br>Details: {html.escape(err)[:200]}
   </footer>
 </body>
 </html>"""
@@ -507,18 +660,22 @@ def main() -> int:
     tz = ZoneInfo(CONFIG["timezone"])
     now = datetime.now(tz)
 
-    print(f"Ziehe Wetter für {CONFIG['location']['name']} ...")
-    data = fetch_weather(CONFIG)
-
-    hours = [rate_hour(h, CONFIG) for h in parse_hours(data, CONFIG, now)]
-    days = group_days(hours, now)
-    print(f"  {len(hours)} Gassi-Stunden, {len(days)} Tage aufbereitet.")
-
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "index.html"
-    out_file.write_text(build_html(days, CONFIG, now), encoding="utf-8")
-    print(f"OK: {out_file} geschrieben.")
+
+    print(f"Ziehe Wetter für {CONFIG['location']['name']} ...")
+    try:
+        data = fetch_weather(CONFIG)
+        hours = [rate_hour(h, CONFIG) for h in parse_hours(data, CONFIG, now)]
+        days = group_days(hours, now)
+        print(f"  {len(hours)} Gassi-Stunden, {len(days)} Tage aufbereitet.")
+        out_file.write_text(build_html(days, CONFIG, now), encoding="utf-8")
+        print(f"OK: {out_file} geschrieben.")
+    except Exception as e:  # noqa: BLE001  (API/Parsing-Ausfall -> Notseite)
+        print(f"FEHLER: {e}\n  -> schreibe Fallback-Seite.", file=sys.stderr)
+        out_file.write_text(build_fallback_html(CONFIG, now, str(e)),
+                            encoding="utf-8")
     return 0
 
 

@@ -62,9 +62,16 @@ Alle Schwellwerte stehen zentral im `CONFIG`-Block oben in
 | `walk_hours` | Zeitfenster, das überhaupt als Gassi-Zeit gilt (z. B. 5–22 Uhr) |
 | `rain.prob_ok` / `prob_bad` | Regenwahrscheinlichkeit für „mittel" bzw. „schlecht" (%) |
 | `rain.mm_bad` | Regenmenge, ab der es „schlecht" ist (mm/h) |
-| `heat.warn` / `bad` | Temperatur für „warm/aufpassen" bzw. „zu heiß" (°C) |
+| `heat.warn` / `bad` | Lufttemperatur für „warm/aufpassen" bzw. „zu heiß" (°C, Asphalt-Näherung) |
+| `cold.warn` / `bad` | **Gefühlte** Temperatur (Windchill) für „kalt" bzw. „eisig" (°C) |
+| `glaette_temp` | Ab/unter dieser Lufttemperatur + Nässe/Schnee → Glätte-Hinweis (°C) |
+| `wind.gust_warn` / `gust_bad` | Windböen für „böig" bzw. „Sturmböen" (km/h) |
 | `sun.cloud_max` / `uv_warn` | Ab wann es als „pralle Sonne" gilt (Wolken % / UV) |
 | `days` | Wie viele Tage voraus (Standard 2 = heute + morgen) |
+
+**Harte Ausschlüsse** (immer „schlecht", unabhängig von den Schwellen): Gewitter,
+Schnee und Glatteis – erkannt am WMO-`weather_code` von Open-Meteo. Jedes Fenster
+zeigt zusätzlich ein Wetter-Icon (☀️ 🌧️ ⛈️ 🌨️ …).
 
 Cron-Zeit änderst du in [`.github/workflows/gassi.yml`](.github/workflows/gassi.yml)
 unter `schedule`. Ein zweiter Lauf pro Tag = einfach eine zweite `cron`-Zeile.
