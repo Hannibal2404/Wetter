@@ -4,6 +4,8 @@ on:
   schedule:
     # Taeglich 04:00 UTC ~= 06:00 deutsche Zeit (+-1 h je Sommer-/Winterzeit).
     - cron: "0 4 * * *"
+  push:
+    branches: [main]        # jeder Push auf main baut + deployt automatisch
   workflow_dispatch: {}   # manuell ausloesbar (Actions-Tab -> Run workflow)
 
 # Rechte fuer den offiziellen GitHub-Pages-Deploy (kein PAT noetig).
