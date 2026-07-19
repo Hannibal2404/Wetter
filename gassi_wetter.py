@@ -459,15 +459,14 @@ body{background:var(--paper);color:var(--ink);font-family:var(--sans);
   font-variant-numeric:tabular-nums;letter-spacing:-.01em;}
 .wx{width:26px;height:26px;flex:none;display:inline-flex;}
 .wx svg{width:100%;height:100%;overflow:visible;}
-.wx .spin{transform-origin:center;}
-@media (prefers-reduced-motion:no-preference){
-  .wx .spin{animation:wxspin 16s linear infinite;}
-  .wx .drift{animation:wxdrift 3.6s ease-in-out infinite;}
-  .wx .drop{animation:wxdrop 1.3s linear infinite;}
-  .wx .flake{animation:wxflake 2.6s linear infinite;}
-  .wx .fog{animation:wxfog 3.4s ease-in-out infinite;}
-  .wx .bolt{animation:wxbolt 2.4s steps(1,end) infinite;}
-}
+/* Bewegung laeuft immer -- bewusst NICHT hinter prefers-reduced-motion, weil
+   die animierten Wetter-Icons hier ausdruecklich gewuenscht sind. */
+.wx .spin{transform-origin:center;animation:wxspin 16s linear infinite;}
+.wx .drift{animation:wxdrift 3.6s ease-in-out infinite;}
+.wx .drop{animation:wxdrop 1.3s linear infinite;}
+.wx .flake{animation:wxflake 2.6s linear infinite;}
+.wx .fog{animation:wxfog 3.4s ease-in-out infinite;}
+.wx .bolt{animation:wxbolt 2.4s steps(1,end) infinite;}
 @keyframes wxspin{to{transform:rotate(360deg);}}
 @keyframes wxdrift{0%,100%{transform:translateX(-1px);}50%{transform:translateX(1.2px);}}
 @keyframes wxdrop{0%{transform:translateY(-2px);opacity:0;}25%{opacity:1;}100%{transform:translateY(5px);opacity:0;}}
