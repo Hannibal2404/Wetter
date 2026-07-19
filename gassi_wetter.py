@@ -4,12 +4,12 @@
 Gassi-Wetter Magdeburg
 ======================
 Zieht die stuendliche Wettervorhersage von Open-Meteo (kostenlos, kein API-Key),
-bewertet fuer heute und morgen die besten Zeitfenster fuer Gassirunden und baut
+bewertet für heute und morgen die besten Zeitfenster für Gassirunden und baut
 ein mobiles HTML-Dashboard (index.html) im Magazin-Stil.
 
 Zu vermeiden:
   - Regen (Wahrscheinlichkeit + Menge)
-  - Hitze (Lufttemperatur als Naeherung fuer heissen Asphalt; Pfotenschutz)
+  - Hitze (Lufttemperatur als Naeherung für heissen Asphalt; Pfotenschutz)
   - Pralle Sonne (wenig Wolken bei Tag + hoher UV) -> Extra-Hinweis
 
 Alle Schwellwerte stehen zentral in CONFIG (siehe unten) und lassen sich ohne
@@ -50,7 +50,7 @@ CONFIG = {
         "mm_bad":   0.5,  # ab dieser Regenmenge (mm/h): schlecht, egal welche %
     },
 
-    # Hitze: Lufttemperatur in Grad C (Naeherung fuer heissen Asphalt/Pfoten).
+    # Hitze: Lufttemperatur in Grad C (Naeherung für heissen Asphalt/Pfoten).
     "heat": {
         "warn": 25,   # ab hier: mittel (Pfoten im Blick behalten)
         "bad":  30,   # ab hier: schlecht (Asphalt zu heiss)
@@ -458,20 +458,21 @@ def build_html(days: list[dict], cfg: dict, now: datetime) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex">
 <meta name="color-scheme" content="dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E⛅%3C/text%3E%3C/svg%3E">
 <title>Gassi-Wetter {loc}</title>
 <style>{CSS}</style>
 </head>
 <body>
   <header class="masthead">
-    <div class="kicker">🐕 Gassi-Planer</div>
+    <div class="kicker">⛅ Gassi-Planer</div>
     <h1 class="title">{loc}</h1>
-    <p class="sub">Beste Zeitfenster fuer die Hunderunde &middot; Stand {stand}</p>
+    <p class="sub">Beste Zeitfenster für die Hunderunde &middot; Stand {stand}</p>
   </header>
 
   <div class="legend">
-    <span class="lg"><span class="dot" style="background:var(--good)"></span>Gut — raus damit</span>
-    <span class="lg"><span class="dot" style="background:var(--warn)"></span>Mittel — geht, aufpassen</span>
-    <span class="lg"><span class="dot" style="background:var(--bad)"></span>Schlecht — lieber meiden</span>
+    <span class="lg"><span class="dot" style="background:var(--good)"></span>Gut</span>
+    <span class="lg"><span class="dot" style="background:var(--warn)"></span>Mittel</span>
+    <span class="lg"><span class="dot" style="background:var(--bad)"></span>Schlecht</span>
   </div>
 
   {days_html}
@@ -491,15 +492,22 @@ def build_html(days: list[dict], cfg: dict, now: datetime) -> str:
 # MAIN
 # ---------------------------------------------------------------------------
 def main() -> int:
+    # Umlaute in der Konsolenausgabe auch unter Windows (cp1252) erlauben.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except AttributeError:
+            pass
+
     ap = argparse.ArgumentParser(description="Gassi-Wetter Dashboard bauen")
     ap.add_argument("--out", default="public",
-                    help="Zielverzeichnis fuer index.html (Standard: public)")
+                    help="Zielverzeichnis für index.html (Standard: public)")
     args = ap.parse_args()
 
     tz = ZoneInfo(CONFIG["timezone"])
     now = datetime.now(tz)
 
-    print(f"Ziehe Wetter fuer {CONFIG['location']['name']} ...")
+    print(f"Ziehe Wetter für {CONFIG['location']['name']} ...")
     data = fetch_weather(CONFIG)
 
     hours = [rate_hour(h, CONFIG) for h in parse_hours(data, CONFIG, now)]
