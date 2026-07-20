@@ -30,6 +30,7 @@ import html
 import json
 import math
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta
@@ -88,8 +89,14 @@ CONFIG = {
     "week_days": 7,  # kompakter Wochen-Ausblick unten
     "rain_horizon_h": 6,  # Vorausschau fuer den Naechster-Regen-Hinweis (Std)
 
-    # Oeffentliche Adresse der Web-App (fuer den Klick in der Push-Nachricht).
+    # Oeffentliche Adresse der Web-App (fuer den Klick in der Push-Nachricht
+    # UND als Ablage des "heute schon benachrichtigt"-Markers).
     "site_url": "https://hannibal2404.github.io/Wetter/",
+
+    # Morgen-Push nur in diesem lokalen Zeitfenster (Stunden, Ende exklusiv).
+    # Mehrere Cron-Versuche liegen darin; der Dedupe-Marker sorgt dafuer, dass
+    # trotzdem nur EINE Nachricht pro Tag rausgeht.
+    "notify_window": {"start": 5, "end": 10},
 }
 
 # API
@@ -1004,7 +1011,7 @@ def write_icons(out_dir: Path) -> None:
 
 
 def build_html(days: list[dict], cfg: dict, now: datetime,
-               outlook=None, week=None) -> str:
+               outlook=None, week=None, notified: str = "") -> str:
     loc = cfg["location"]["name"]
     stand = now.strftime("%d.%m.%Y, %H:%M Uhr")
     days_html = "".join(_day_html(d, cfg, now) for d in days)
@@ -1018,6 +1025,7 @@ def build_html(days: list[dict], cfg: dict, now: datetime,
 <meta name="color-scheme" content="dark">
 <title>{APP_NAME}</title>
 {ICON_HEAD}
+<meta name="gassi-notified" content="{notified}">
 <style>{CSS}</style>
 </head>
 <body>
@@ -1053,9 +1061,11 @@ def build_html(days: list[dict], cfg: dict, now: datetime,
 </html>"""
 
 
-def build_fallback_html(cfg: dict, now: datetime, err: str) -> str:
+def build_fallback_html(cfg: dict, now: datetime, err: str,
+                        notified: str = "") -> str:
     """Notseite, falls Open-Meteo nach mehreren Versuchen nicht erreichbar ist.
-    Wird deployt, damit die Live-URL nie kaputt/leer wirkt."""
+    Wird deployt, damit die Live-URL nie kaputt/leer wirkt. Der Dedupe-Marker
+    wird durchgereicht, damit ein Ausfall den Push-Zustand nicht loescht."""
     loc = cfg["location"]["name"]
     stand = now.strftime("%d.%m.%Y, %H:%M Uhr")
     return f"""<!doctype html>
@@ -1067,6 +1077,7 @@ def build_fallback_html(cfg: dict, now: datetime, err: str) -> str:
 <meta name="color-scheme" content="dark">
 <title>{APP_NAME}</title>
 {ICON_HEAD}
+<meta name="gassi-notified" content="{notified}">
 <style>{CSS}</style>
 </head>
 <body>
@@ -1126,14 +1137,55 @@ def _notify_content(day: dict) -> tuple[str, str, str]:
             "dog2,umbrella")
 
 
-def send_ntfy(day: dict, cfg: dict) -> None:
+MARKER_RE = re.compile(r'name="gassi-notified"\s+content="([^"]*)"')
+
+
+def read_live_marker(cfg: dict) -> str | None:
+    """Liest den 'zuletzt benachrichtigt'-Marker aus der aktuell VEROEFFENTLICHTEN
+    Seite. Das ist unser Dedupe-Speicher: Jeder Lauf startet auf einem frischen
+    Runner, die live stehende Seite ist der einzige gemeinsame Zustand.
+    Rueckgabe: Datum als 'JJJJ-MM-TT', '' wenn kein Marker, None bei Fehler."""
+    url = cfg.get("site_url")
+    if not url:
+        return None
+    try:
+        r = httpx.get(f"{url}?cb={int(time.time())}",
+                      headers={"User-Agent": USER_AGENT,
+                               "Cache-Control": "no-cache", "Pragma": "no-cache"},
+                      timeout=15, follow_redirects=True)
+        r.raise_for_status()
+        m = MARKER_RE.search(r.text)
+        return m.group(1) if m else ""
+    except Exception as e:  # noqa: BLE001
+        # Fail-open: lieber einmal doppelt melden als den Morgen-Push verschlucken.
+        print(f"Hinweis: Marker nicht lesbar ({e}) -> Push nicht unterdrueckt.",
+              file=sys.stderr)
+        return None
+
+
+def should_notify(mode: str, now: datetime, prev_marker: str | None,
+                  cfg: dict) -> tuple[bool, str]:
+    """Entscheidet, ob dieser Lauf pushen darf. Bewusst hier (nicht im YAML),
+    damit keine Cron-Strings doppelt gepflegt werden muessen."""
+    if mode == "force":
+        return True, "manueller Lauf (erzwungen)"
+    w = cfg["notify_window"]
+    if not (w["start"] <= now.hour < w["end"]):
+        return False, (f"ausserhalb des Melde-Fensters "
+                       f"{w['start']}-{w['end']} Uhr")
+    if prev_marker == now.date().isoformat():
+        return False, "heute wurde bereits benachrichtigt"
+    return True, "erster erfolgreicher Morgenlauf heute"
+
+
+def send_ntfy(day: dict, cfg: dict) -> bool:
     """Schickt die Morgen-Zusammenfassung als Push an ntfy. Best-effort:
-    Fehler brechen den Build nie ab."""
+    Fehler brechen den Build nie ab. Rueckgabe: True bei Erfolg."""
     topic = os.environ.get("NTFY_TOPIC")
     if not topic:
         print("Hinweis: NTFY_TOPIC nicht gesetzt -> keine Push-Nachricht.",
               file=sys.stderr)
-        return
+        return False
     server = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
     title, body, tags = _notify_content(day)
     try:
@@ -1150,8 +1202,10 @@ def send_ntfy(day: dict, cfg: dict) -> None:
         )
         r.raise_for_status()
         print(f"OK: Push an {server}/<topic> gesendet.")
+        return True
     except Exception as e:  # noqa: BLE001  (Push ist best-effort)
         print(f"Warnung: Push fehlgeschlagen: {e}", file=sys.stderr)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -1178,6 +1232,12 @@ def main() -> int:
     out_file = out_dir / "index.html"
     write_icons(out_dir)  # Icons + Manifest (wetterunabhaengig)
 
+    # Dedupe-Marker aus der live stehenden Seite lesen (einziger Zustand ueber
+    # Laeufe hinweg). Immer lesen, damit ihn auch stille Deploys nicht loeschen.
+    today_iso = now.date().isoformat()
+    prev_marker = read_live_marker(CONFIG)
+    mode = os.environ.get("GASSI_NOTIFY", "")
+
     print(f"Ziehe Wetter für {CONFIG['location']['name']} ...")
     try:
         data = fetch_weather(CONFIG)
@@ -1188,19 +1248,29 @@ def main() -> int:
         outlook = parse_rain_outlook(data, CONFIG, now)
         print(f"  {len(hours)} Gassi-Stunden, {len(days)} Detailtage, "
               f"{len(daily)} Tage im Ausblick.")
-        out_file.write_text(
-            build_html(days, CONFIG, now, outlook, daily), encoding="utf-8")
-        print(f"OK: {out_file} geschrieben.")
 
-        # Morgen-Push nur, wenn der Workflow es anfordert (GASSI_NOTIFY=1).
-        if os.environ.get("GASSI_NOTIFY") == "1":
-            today = next((d for d in days if d["is_today"]), None)
-            if today:
-                send_ntfy(today, CONFIG)
+        # Push VOR dem Schreiben entscheiden -> Ergebnis landet als Marker
+        # in der Seite und unterdrueckt die weiteren Cron-Versuche des Tages.
+        sent = False
+        if mode:
+            ok, reason = should_notify(mode, now, prev_marker, CONFIG)
+            print(f"  Push: {'ja' if ok else 'nein'} ({reason})")
+            if ok:
+                today_day = next((d for d in days if d["is_today"]), None)
+                if today_day:
+                    sent = send_ntfy(today_day, CONFIG)
+        marker = today_iso if (sent or prev_marker == today_iso) \
+            else (prev_marker or "")
+
+        out_file.write_text(
+            build_html(days, CONFIG, now, outlook, daily, marker),
+            encoding="utf-8")
+        print(f"OK: {out_file} geschrieben (Marker: {marker or '-'}).")
     except Exception as e:  # noqa: BLE001  (API/Parsing-Ausfall -> Notseite)
         print(f"FEHLER: {e}\n  -> schreibe Fallback-Seite.", file=sys.stderr)
-        out_file.write_text(build_fallback_html(CONFIG, now, str(e)),
-                            encoding="utf-8")
+        out_file.write_text(
+            build_fallback_html(CONFIG, now, str(e), prev_marker or ""),
+            encoding="utf-8")
     return 0
 
 

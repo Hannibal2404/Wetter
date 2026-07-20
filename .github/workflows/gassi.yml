@@ -2,13 +2,18 @@ name: Gassi-Wetter
 
 on:
   schedule:
-    # 2x taeglich (UTC): ~06:23 DE morgens + ~14:23 DE frueher Nachmittag
-    # (+-1 h je Sommer-/Winterzeit).
-    # WICHTIG: bewusst NICHT zur vollen Stunde. GitHub-Cron ist "best effort";
-    # zur vollen Stunde ist die Last am hoechsten und Laeufe werden verzoegert
-    # oder ganz verworfen. Eine krumme Minute laeuft deutlich zuverlaessiger.
+    # GitHub-Cron ist "best effort" und verwirft Laeufe gelegentlich komplett
+    # (besonders zur vollen Stunde). Daher: krumme Minuten UND mehrere Versuche.
+    # Morgens 3 Anlaeufe (~06:23 / 06:41 / 07:07 DE) - der erste, der
+    # durchkommt, schickt den Push; die restlichen erkennen am Dedupe-Marker
+    # in der veroeffentlichten Seite, dass heute schon gemeldet wurde.
     - cron: "23 4 * * *"
+    - cron: "41 4 * * *"
+    - cron: "7 5 * * *"
+    # Nachmittags 2 Anlaeufe (~14:23 / 14:41 DE) - nur Aktualisierung, kein Push
+    # (liegt ausserhalb des notify_window in der CONFIG).
     - cron: "23 12 * * *"
+    - cron: "41 12 * * *"
   push:
     branches: [main]        # jeder Push auf main baut + deployt automatisch
   workflow_dispatch: {}   # manuell ausloesbar (Actions-Tab -> Run workflow)
@@ -43,10 +48,14 @@ jobs:
       - name: Dashboard bauen (+ Morgen-Push beim 06:00-Lauf / manuell)
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-          # Push nur beim Morgen-Cron (04:23 UTC) oder manuellem Lauf zum Testen;
-          # der Nachmittags-Cron und Pushs deployen still.
-          # Der String muss exakt dem cron-Eintrag oben entsprechen!
-          GASSI_NOTIFY: ${{ (github.event.schedule == '23 4 * * *' || github.event_name == 'workflow_dispatch') && '1' || '' }}
+          # "force" = manueller Lauf, pusht immer (zum Testen).
+          # "1"     = geplanter Lauf; ob wirklich gepusht wird, entscheidet das
+          #           Skript anhand notify_window + Dedupe-Marker.
+          # ""      = Push-Deploys sind still.
+          # Bewusst KEIN Vergleich auf Cron-Strings mehr - die mussten sonst an
+          # zwei Stellen gepflegt werden und ein Tippfehler haette den Push
+          # stillschweigend fuer immer abgeschaltet.
+          GASSI_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && 'force' || (github.event_name == 'schedule' && '1' || '') }}
         run: python gassi_wetter.py --out ./public
 
       - name: Pages-Artefakt hochladen
