@@ -2,11 +2,13 @@ name: Gassi-Wetter
 
 on:
   schedule:
-    # 2x taeglich (UTC). ~06:00 DE morgens + ~14:00 DE frueher Nachmittag,
-    # damit sich aendernde Vorhersagen (Schauer/Boeen) tagsueber aktualisiert werden.
-    # (+-1 h je Sommer-/Winterzeit.)
-    - cron: "0 4 * * *"
-    - cron: "0 12 * * *"
+    # 2x taeglich (UTC): ~06:23 DE morgens + ~14:23 DE frueher Nachmittag
+    # (+-1 h je Sommer-/Winterzeit).
+    # WICHTIG: bewusst NICHT zur vollen Stunde. GitHub-Cron ist "best effort";
+    # zur vollen Stunde ist die Last am hoechsten und Laeufe werden verzoegert
+    # oder ganz verworfen. Eine krumme Minute laeuft deutlich zuverlaessiger.
+    - cron: "23 4 * * *"
+    - cron: "23 12 * * *"
   push:
     branches: [main]        # jeder Push auf main baut + deployt automatisch
   workflow_dispatch: {}   # manuell ausloesbar (Actions-Tab -> Run workflow)
@@ -41,9 +43,10 @@ jobs:
       - name: Dashboard bauen (+ Morgen-Push beim 06:00-Lauf / manuell)
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-          # Push nur beim Morgen-Cron (04:00 UTC) oder manuellem Lauf zum Testen;
+          # Push nur beim Morgen-Cron (04:23 UTC) oder manuellem Lauf zum Testen;
           # der Nachmittags-Cron und Pushs deployen still.
-          GASSI_NOTIFY: ${{ (github.event.schedule == '0 4 * * *' || github.event_name == 'workflow_dispatch') && '1' || '' }}
+          # Der String muss exakt dem cron-Eintrag oben entsprechen!
+          GASSI_NOTIFY: ${{ (github.event.schedule == '23 4 * * *' || github.event_name == 'workflow_dispatch') && '1' || '' }}
         run: python gassi_wetter.py --out ./public
 
       - name: Pages-Artefakt hochladen
