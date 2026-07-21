@@ -205,11 +205,19 @@ def parse_hours(data: dict, cfg: dict, now: datetime) -> list[dict]:
     out = []
     tz = ZoneInfo(cfg["timezone"])
     now_floor = now.replace(minute=0, second=0, microsecond=0)
+    n = len(times)
     for i, t in enumerate(times):
         dt = datetime.fromisoformat(t).replace(tzinfo=tz)
         hour = dt.hour
         if not (cfg["walk_hours"]["start"] <= hour <= cfg["walk_hours"]["end"]):
             continue  # ausserhalb der Gassi-Zeiten
+        # WICHTIG: Open-Meteo gibt Niederschlag (und den daraus abgeleiteten
+        # weather_code) als Summe der VORANGEGANGENEN Stunde aus. Der Wert mit
+        # Zeitstempel 17:00 beschreibt also 16:00-17:00. Fuer die Stunde ab `dt`
+        # ist deshalb der Eintrag i+1 der richtige - sonst waere die Regen-
+        # bewertung um eine Stunde verschoben (empirisch mit 15-Minuten-Daten
+        # bestaetigt). Temperatur/Wolken/Wind sind dagegen Momentanwerte.
+        nxt = i + 1 if i + 1 < n else i
         out.append({
             "dt": dt,
             "hour": hour,
@@ -217,9 +225,9 @@ def parse_hours(data: dict, cfg: dict, now: datetime) -> list[dict]:
             "is_now": dt == now_floor,
             "temp": _num(h["temperature_2m"][i]),
             "feels": _num(h["apparent_temperature"][i]),
-            "rain_prob": _num(h["precipitation_probability"][i]),
-            "rain_mm": _num(h["precipitation"][i]),
-            "wcode": int(_num(h["weather_code"][i])),
+            "rain_prob": _num(h["precipitation_probability"][nxt]),
+            "rain_mm": _num(h["precipitation"][nxt]),
+            "wcode": int(_num(h["weather_code"][nxt])),
             "cloud": _num(h["cloud_cover"][i]),
             "uv": _num(h["uv_index"][i]),
             "gust": _num(h["wind_gusts_10m"][i]),
