@@ -102,6 +102,10 @@ CONFIG = {
     # UND als Ablage des "heute schon benachrichtigt"-Markers).
     "site_url": "https://hannibal2404.github.io/Wetter/",
 
+    # Ab diesem Alter (Stunden) warnt die Seite selbst, dass die Daten alt sind.
+    # Faengt JEDE Ursache ab: abgelaufenes Token, toter Cron-Dienst, API-Ausfall.
+    "stale_warn_h": 6,
+
     # Morgen-Push nur in diesem lokalen Zeitfenster (Stunden, Ende exklusiv).
     # Bewusst WEIT gefasst: GitHub-Cron laeuft nachweislich bis zu ~5 Stunden
     # zu spaet (beobachtet: 14:23 geplant -> 19:11 gelaufen). Ein enges Fenster
@@ -644,6 +648,14 @@ body{background:var(--paper);color:var(--ink);font-family:var(--sans);
 .badge{font-size:12px;color:var(--ink);background:var(--chip);
   border:1px solid var(--line);border-radius:8px;padding:4px 9px;}
 
+/* Warnung, wenn die Seite veraltet ist (per JS eingeblendet) */
+.stale{display:flex;align-items:center;gap:8px;
+  background:color-mix(in srgb,var(--bad) 16%,var(--chip));
+  border:1px solid var(--bad);border-left:4px solid var(--bad);
+  border-radius:10px;padding:10px 13px;font-size:13.5px;margin:0 0 18px;
+  color:var(--bad-ink);}
+.stale[hidden]{display:none;}
+
 /* Naechster-Regen-Hinweis */
 .outlook{display:flex;align-items:center;gap:8px;background:var(--chip);
   border:1px solid var(--line);border-radius:10px;padding:9px 13px;
@@ -1059,6 +1071,8 @@ def build_html(days: list[dict], cfg: dict, now: datetime,
                outlook=None, week=None, notified: str = "") -> str:
     loc = cfg["location"]["name"]
     stand = now.strftime("%d.%m.%Y, %H:%M Uhr")
+    built_iso = now.replace(microsecond=0).isoformat()
+    stale_h = cfg.get("stale_warn_h", 6)
     days_html = "".join(_day_html(d, cfg, now) for d in days)
     wh = cfg["walk_hours"]
     return f"""<!doctype html>
@@ -1079,6 +1093,8 @@ def build_html(days: list[dict], cfg: dict, now: datetime,
     <h1 class="title">{loc}</h1>
     <p class="sub">Beste Zeitfenster für die Hunderunde &middot; Stand {stand}</p>
   </header>
+
+  <div class="stale" id="stale" hidden></div>
 
   <div class="legend">
     <span class="lg"><span class="dot" style="background:var(--good)"></span>Gut</span>
@@ -1102,6 +1118,25 @@ def build_html(days: list[dict], cfg: dict, now: datetime,
     Wetterdaten: <a href="https://open-meteo.com/">Open-Meteo</a> (kostenlos, ohne Gewähr) &middot;
     Automatische Aktualisierung morgens &amp; am frühen Nachmittag.
   </footer>
+<script>
+// Blendet eine Warnung ein, wenn die Seite deutlich veraltet ist. Faengt jede
+// Ursache ab (Ausloeser tot, Token abgelaufen, API-Ausfall) -- ohne sie waere
+// veraltete Vorhersage kaum vom aktuellen Stand zu unterscheiden.
+(function () {{
+  var built = new Date("{built_iso}");
+  if (isNaN(built)) return;
+  var hours = (Date.now() - built.getTime()) / 3600000;
+  if (hours < {stale_h}) return;
+  var el = document.getElementById("stale");
+  if (!el) return;
+  var txt = hours < 48
+    ? Math.floor(hours) + " Stunden"
+    : Math.floor(hours / 24) + " Tage";
+  el.textContent = "\\u26A0\\uFE0F Daten sind " + txt +
+    " alt \\u2014 die Aktualisierung h\\u00e4ngt. Werte mit Vorsicht nutzen.";
+  el.hidden = false;
+}})();
+</script>
 </body>
 </html>"""
 

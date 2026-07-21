@@ -14,6 +14,11 @@ on:
     # (liegt ausserhalb des notify_window in der CONFIG).
     - cron: "23 12 * * *"
     - cron: "41 12 * * *"
+  # Externer, puenktlicher Ausloeser (z.B. cron-job.org ruft die GitHub-API).
+  # GitHubs eigener Scheduler lief nachweislich 5-7 Stunden zu spaet; die
+  # schedule-Eintraege oben bleiben nur noch als Notnagel bestehen.
+  repository_dispatch:
+    types: [gassi-morning]
   push:
     branches: [main]        # jeder Push auf main baut + deployt automatisch
   workflow_dispatch: {}   # manuell ausloesbar (Actions-Tab -> Run workflow)
@@ -55,7 +60,7 @@ jobs:
           # Bewusst KEIN Vergleich auf Cron-Strings mehr - die mussten sonst an
           # zwei Stellen gepflegt werden und ein Tippfehler haette den Push
           # stillschweigend fuer immer abgeschaltet.
-          GASSI_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && 'force' || (github.event_name == 'schedule' && '1' || '') }}
+          GASSI_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && 'force' || ((github.event_name == 'schedule' || github.event_name == 'repository_dispatch') && '1' || '') }}
         run: python gassi_wetter.py --out ./public
 
       - name: Pages-Artefakt hochladen
