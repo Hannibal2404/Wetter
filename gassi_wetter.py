@@ -78,6 +78,15 @@ CONFIG = {
         "gust_bad":  60,  # ab hier: schlecht (Sturmboeen)
     },
 
+    # Schauer-/Gewitterrisiko ueber CAPE (labile Schichtung, J/kg).
+    # Hohe Werte heissen: Schauer koennen lokal aus dem Nichts entstehen, die
+    # Stundenvorhersage ist dann unsicherer als sonst.
+    # Grobe Einordnung: <300 stabil, 300-1000 maessig labil, >1000 deutlich.
+    "convective": {
+        "cape_warn": 300,   # ab hier: Hinweis "Schauerrisiko"
+        "cape_high": 800,   # ab hier + etwas Regenwahrscheinlichkeit: nicht mehr "gut"
+    },
+
     # Pralle Sonne: wenig Wolken bei Tag -> Zusatz-Hinweis (Pfoten/Sonnenschutz).
     "sun": {
         "cloud_max": 30,  # Bewoelkung <= diesem Wert (%) gilt als "sonnig"
@@ -163,6 +172,7 @@ def fetch_weather(cfg: dict) -> dict:
             "uv_index",
             "wind_gusts_10m",
             "wind_direction_10m",
+            "cape",
             "is_day",
         ]),
         "daily": ",".join([
@@ -232,6 +242,7 @@ def parse_hours(data: dict, cfg: dict, now: datetime) -> list[dict]:
             "uv": _num(h["uv_index"][i]),
             "gust": _num(h["wind_gusts_10m"][i]),
             "wind_dir": _num(h["wind_direction_10m"][i]),
+            "cape": _num(h["cape"][i]),   # Momentanwert -> Index i
             "is_day": bool(h["is_day"][i]),
         })
     return out
@@ -348,6 +359,17 @@ def rate_hour(h: dict, cfg: dict) -> dict:
             badges.append("🌦️ Schauer möglich")
     penalty += h["rain_prob"] + h["rain_mm"] * 30
 
+    # --- Schauerrisiko (labile Luft) ---
+    # Bewusst zurueckhaltend: hohe CAPE allein macht aus "gut" kein "schlecht"
+    # (labil heisst nur "koennte", nicht "wird"). Der Hinweis warnt aber davor,
+    # der Stundenvorhersage an solchen Tagen zu sehr zu vertrauen.
+    cv = cfg["convective"]
+    if h["cape"] >= cv["cape_warn"] and code not in WX_THUNDER:
+        badges.append("⚡ Schauerrisiko — Vorhersage unsicher")
+        penalty += 6
+        if h["cape"] >= cv["cape_high"] and h["rain_prob"] >= 10:
+            rating = _worse(rating, MITTEL)
+
     # --- Hitze (Lufttemperatur als Asphalt-Naeherung) ---
     if h["temp"] >= heat["bad"]:
         rating = _worse(rating, SCHLECHT)
@@ -427,6 +449,8 @@ def _new_window(h: dict) -> dict:
         "temps": [h["temp"]],
         "feels": [h["feels"]],
         "rain_probs": [h["rain_prob"]],
+        "rain_mms": [h["rain_mm"]],
+        "capes": [h["cape"]],
         "clouds": [h["cloud"]],
         "gusts": [h["gust"]],
         "dirs": [h["wind_dir"]],
@@ -442,6 +466,8 @@ def _extend_window(w: dict, h: dict) -> None:
     w["temps"].append(h["temp"])
     w["feels"].append(h["feels"])
     w["rain_probs"].append(h["rain_prob"])
+    w["rain_mms"].append(h["rain_mm"])
+    w["capes"].append(h["cape"])
     w["clouds"].append(h["cloud"])
     w["gusts"].append(h["gust"])
     w["dirs"].append(h["wind_dir"])
@@ -461,6 +487,10 @@ def _finalize_window(w: dict) -> None:
     w["temp_max"] = round(max(w["temps"]))
     w["feels_avg"] = round(sum(w["feels"]) / n)
     w["rain_max"] = int(max(w["rain_probs"]))
+    # Spitzenintensitaet (mm/h), nicht die Summe: sagt "wie nass werde ich",
+    # ohne bei langen Fenstern zu dramatisieren.
+    w["mm_max"] = max(w["rain_mms"])
+    w["cape_max"] = round(max(w["capes"]))
     w["cloud_avg"] = round(sum(w["clouds"]) / n)
     w["gust_max"] = round(max(w["gusts"]))
     w["wind_dir"] = round(_circular_mean(w["dirs"]))
@@ -607,7 +637,7 @@ body{background:var(--paper);color:var(--ink);font-family:var(--sans);
 .metrics{display:flex;gap:18px;flex-wrap:wrap;margin-top:11px;}
 .metric{display:flex;flex-direction:column;gap:1px;}
 .metric__v{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums;}
-.metric__v .feels{font-weight:400;color:var(--muted);font-size:13px;}
+.metric__v .feels,.metric__v .mm{font-weight:400;color:var(--muted);font-size:13px;}
 .metric__k{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);}
 
 .badges{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px;}
@@ -875,6 +905,10 @@ def _card_html(w: dict) -> str:
     # Gefuehlte Temperatur nur zeigen, wenn sie spuerbar abweicht (Windchill/Schwuele).
     feels = (f'<span class="feels"> gef. {w["feels_avg"]}°</span>'
              if abs(w["feels_avg"] - temp_mid) >= 2 else "")
+    # Spitzenintensitaet nur zeigen, wenn ueberhaupt nennenswert Regen kommt --
+    # "0,0 mm" waere nur Rauschen. Deutsches Dezimalkomma.
+    mm_txt = f'{w["mm_max"]:.1f}'.replace(".", ",")
+    mm = (f'<span class="mm"> {mm_txt} mm/h</span>' if w["mm_max"] >= 0.05 else "")
     return f"""
       <article class="card {w['rating']}">
         <div class="card__top">
@@ -883,7 +917,7 @@ def _card_html(w: dict) -> str:
         </div>
         <div class="metrics">
           <div class="metric"><span class="metric__v">{temp}C{feels}</span><span class="metric__k">Temperatur</span></div>
-          <div class="metric"><span class="metric__v">{w['rain_max']} %</span><span class="metric__k">Regen</span></div>
+          <div class="metric"><span class="metric__v">{w['rain_max']} %{mm}</span><span class="metric__k">Regen</span></div>
           <div class="metric"><span class="metric__v">{w['gust_max']} km/h{_wind_arrow(w['wind_dir'])}</span><span class="metric__k">Böen</span></div>
           <div class="metric"><span class="metric__v">{w['cloud_avg']} %</span><span class="metric__k">Wolken</span></div>
         </div>
