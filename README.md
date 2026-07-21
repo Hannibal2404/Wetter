@@ -66,6 +66,7 @@ Alle Schwellwerte stehen zentral im `CONFIG`-Block oben in
 | `cold.warn` / `bad` | **Gefühlte** Temperatur (Windchill) für „kalt" bzw. „eisig" (°C) |
 | `glaette_temp` | Ab/unter dieser Lufttemperatur + Nässe/Schnee → Glätte-Hinweis (°C) |
 | `wind.gust_warn` / `gust_bad` | Windböen für „böig" bzw. „Sturmböen" (km/h) |
+| `convective.cape_warn` / `cape_high` | Schauerrisiko bei labiler Luft (CAPE, J/kg) |
 | `sun.cloud_max` / `uv_warn` | Ab wann es als „pralle Sonne" gilt (Wolken % / UV) |
 | `days` | Detailtage mit Karten (Standard 2 = heute + morgen) |
 | `week_days` | Tage im kompakten 7-Tage-Ausblick (Standard 7) |
