@@ -18,7 +18,11 @@ on:
   # GitHubs eigener Scheduler lief nachweislich 5-7 Stunden zu spaet; die
   # schedule-Eintraege oben bleiben nur noch als Notnagel bestehen.
   repository_dispatch:
-    types: [gassi-morning]
+    # gassi-morning : Morgenlauf (schickt den Push, sofern heute noch keiner ging)
+    # gassi-refresh : reine Aktualisierung (z.B. nachmittags) - ob dabei gepusht
+    #                 wird, entscheidet ohnehin notify_window + Dedupe im Skript,
+    #                 die beiden Typen unterscheiden sich also nur in der Absicht.
+    types: [gassi-morning, gassi-refresh]
   push:
     branches: [main]        # jeder Push auf main baut + deployt automatisch
   workflow_dispatch: {}   # manuell ausloesbar (Actions-Tab -> Run workflow)
