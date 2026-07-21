@@ -94,9 +94,12 @@ CONFIG = {
     "site_url": "https://hannibal2404.github.io/Wetter/",
 
     # Morgen-Push nur in diesem lokalen Zeitfenster (Stunden, Ende exklusiv).
-    # Mehrere Cron-Versuche liegen darin; der Dedupe-Marker sorgt dafuer, dass
-    # trotzdem nur EINE Nachricht pro Tag rausgeht.
-    "notify_window": {"start": 5, "end": 10},
+    # Bewusst WEIT gefasst: GitHub-Cron laeuft nachweislich bis zu ~5 Stunden
+    # zu spaet (beobachtet: 14:23 geplant -> 19:11 gelaufen). Ein enges Fenster
+    # wuerde einen verspaeteten Morgenlauf stumm schalten - lieber eine spaete
+    # Nachricht als gar keine. Der Dedupe-Marker haelt es trotzdem bei EINER
+    # Nachricht pro Tag. Ende 14 Uhr, damit die Nachmittagslaeufe still bleiben.
+    "notify_window": {"start": 4, "end": 14},
 }
 
 # API
