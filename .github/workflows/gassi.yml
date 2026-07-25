@@ -18,11 +18,14 @@ on:
   # GitHubs eigener Scheduler lief nachweislich 5-7 Stunden zu spaet; die
   # schedule-Eintraege oben bleiben nur noch als Notnagel bestehen.
   repository_dispatch:
-    # gassi-morning : Morgenlauf (schickt den Push, sofern heute noch keiner ging)
-    # gassi-refresh : reine Aktualisierung (z.B. nachmittags) - ob dabei gepusht
-    #                 wird, entscheidet ohnehin notify_window + Dedupe im Skript,
-    #                 die beiden Typen unterscheiden sich also nur in der Absicht.
-    types: [gassi-morning, gassi-refresh]
+    # gassi-morning    : Morgenlauf (schickt den Push, sofern heute noch keiner ging)
+    # gassi-refresh    : reine Aktualisierung (z.B. nachmittags) - ob dabei gepusht
+    #                    wird, entscheidet ohnehin notify_window + Dedupe im Skript,
+    #                    die beiden Typen unterscheiden sich also nur in der Absicht.
+    # gassi-rain-check : Regen-Alarm-Lauf (haeufiger Takt, z.B. alle 30 Min ueber
+    #                    cron-job.org). Schickt KEINE Morgen-Zusammenfassung, nur den
+    #                    Regen-Alarm bei einem kurzfristigen Uebergang (GASSI_RAIN=1).
+    types: [gassi-morning, gassi-refresh, gassi-rain-check]
   push:
     branches: [main]        # jeder Push auf main baut + deployt automatisch
   workflow_dispatch: {}   # manuell ausloesbar (Actions-Tab -> Run workflow)
@@ -64,7 +67,12 @@ jobs:
           # Bewusst KEIN Vergleich auf Cron-Strings mehr - die mussten sonst an
           # zwei Stellen gepflegt werden und ein Tippfehler haette den Push
           # stillschweigend fuer immer abgeschaltet.
-          GASSI_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && 'force' || ((github.event_name == 'schedule' || github.event_name == 'repository_dispatch') && '1' || '') }}
+          # Der gassi-rain-check-Dispatch ist vom Morgen-Push ausgenommen -> '1'
+          # nur fuer die uebrigen repository_dispatch-Typen.
+          GASSI_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && 'force' || github.event_name == 'schedule' && '1' || (github.event_name == 'repository_dispatch' && github.event.action != 'gassi-rain-check') && '1' || '' }}
+          # Regen-Alarm nur beim eigenen Dispatch-Typ (und bei manuellem Lauf zum
+          # Testen). Dedupe im Skript verhindert Wiederholungen.
+          GASSI_RAIN: ${{ (github.event_name == 'repository_dispatch' && github.event.action == 'gassi-rain-check') && '1' || github.event_name == 'workflow_dispatch' && '1' || '' }}
         run: python gassi_wetter.py --out ./public
 
       - name: Pages-Artefakt hochladen

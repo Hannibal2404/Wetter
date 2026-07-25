@@ -57,10 +57,21 @@ CONFIG = {
         "mm_bad":   0.5,  # ab dieser Regenmenge (mm/h): schlecht, egal welche %
     },
 
-    # Hitze: Lufttemperatur in Grad C (Naeherung für heissen Asphalt/Pfoten).
+    # Asphalt-Hitze: Bodenoberflaeche (soil_temperature_0cm) in Grad C -- direkter
+    # Proxy fuer heisse Pfoten. Schwellen deutlich hoeher als bei der Luft, weil
+    # dunkler Asphalt in der Sonne weit ueber die Lufttemperatur klettert (bei
+    # ~28 Grad Luft locker 50+). Grober Richtwert aus der Tiermedizin: ab ~52 Grad
+    # drohen Verbrennungen der Ballen in Sekunden.
+    "asphalt": {
+        "warn": 45,   # ab hier: mittel (Pfoten pruefen, Schatten/Gras suchen)
+        "bad":  52,   # ab hier: schlecht (Verbrennungsgefahr)
+    },
+
+    # Hitze: Lufttemperatur in Grad C -- Ueberhitzung/Hechelrisiko des Hundes
+    # (getrennt vom Asphalt, das sind zwei verschiedene Gefahren).
     "heat": {
-        "warn": 25,   # ab hier: mittel (Pfoten im Blick behalten)
-        "bad":  30,   # ab hier: schlecht (Asphalt zu heiss)
+        "warn": 25,   # ab hier: mittel
+        "bad":  30,   # ab hier: schlecht
     },
 
     # Kaelte: bewertet die GEFUEHLTE Temperatur (inkl. Windchill) in Grad C.
@@ -113,6 +124,14 @@ CONFIG = {
     # Nachricht als gar keine. Der Dedupe-Marker haelt es trotzdem bei EINER
     # Nachricht pro Tag. Ende 14 Uhr, damit die Nachmittagslaeufe still bleiben.
     "notify_window": {"start": 4, "end": 14},
+
+    # Regen-Alarm (eigener Auslöser gassi-rain-check, GASSI_RAIN=1): schickt einen
+    # Extra-Push, wenn im Gassi-Fenster kurzfristig Regen anfaengt oder aufhoert.
+    # Dedupe ueber einen eigenen Marker (gassi-rain-alert) je Ereignis-Stunde.
+    "rain_alert": {
+        "lead_min": 90,                     # nur melden, wenn das Ereignis so bald bevorsteht (Min)
+        "window": {"start": 6, "end": 21},  # nur in diesen Stunden stoeren (Ende exklusiv)
+    },
 }
 
 # API
@@ -169,6 +188,7 @@ def fetch_weather(cfg: dict) -> dict:
         "hourly": ",".join([
             "temperature_2m",
             "apparent_temperature",
+            "soil_temperature_0cm",   # Bodenoberflaeche -> Asphalt-/Pfotenhitze
             "precipitation_probability",
             "precipitation",
             "weather_code",
@@ -239,6 +259,8 @@ def parse_hours(data: dict, cfg: dict, now: datetime) -> list[dict]:
             "is_now": dt == now_floor,
             "temp": _num(h["temperature_2m"][i]),
             "feels": _num(h["apparent_temperature"][i]),
+            "soil0": _num(h["soil_temperature_0cm"][i]),  # Momentanwert -> Index i
+
             "rain_prob": _num(h["precipitation_probability"][nxt]),
             "rain_mm": _num(h["precipitation"][nxt]),
             "wcode": int(_num(h["weather_code"][nxt])),
@@ -333,7 +355,7 @@ def rate_hour(h: dict, cfg: dict) -> dict:
     Zahlen (Temp, Regen%, Boeen) stehen in den Metrik-Kacheln; Badges bleiben
     qualitativ, damit sie nie einem Kachelwert widersprechen."""
     rain, heat, cold = cfg["rain"], cfg["heat"], cfg["cold"]
-    sun, wind = cfg["sun"], cfg["wind"]
+    sun, wind, asph = cfg["sun"], cfg["wind"], cfg["asphalt"]
     code = h["wcode"]
     rating = GUT
     penalty = 0.0
@@ -374,14 +396,26 @@ def rate_hour(h: dict, cfg: dict) -> dict:
         if h["cape"] >= cv["cape_high"] and h["rain_prob"] >= 10:
             rating = _worse(rating, MITTEL)
 
-    # --- Hitze (Lufttemperatur als Asphalt-Naeherung) ---
+    # --- Asphalt-Hitze (Bodenoberflaeche -> Pfotenverbrennung) ---
+    # Beide Auspraegungen fuehren mit 🐾, damit je Fenster nur eine Asphalt-Marke
+    # erscheint (Dedupe in _extend_window geht nach dem ersten Emoji).
+    if h["soil0"] >= asph["bad"]:
+        rating = _worse(rating, SCHLECHT)
+        badges.append("🐾 Asphalt zu heiß")
+        penalty += (h["soil0"] - asph["warn"]) * 2 + 30
+    elif h["soil0"] >= asph["warn"]:
+        rating = _worse(rating, MITTEL)
+        badges.append("🐾 Asphalt warm — Pfoten prüfen")
+        penalty += (h["soil0"] - asph["warn"]) * 2
+
+    # --- Hitze (Lufttemperatur -> Ueberhitzung des Hundes) ---
     if h["temp"] >= heat["bad"]:
         rating = _worse(rating, SCHLECHT)
-        badges.append("🌡️ Asphalt zu heiß")
+        badges.append("🥵 Hitze — Überhitzungsgefahr")
         penalty += (h["temp"] - heat["warn"]) * 4 + 30
     elif h["temp"] >= heat["warn"]:
         rating = _worse(rating, MITTEL)
-        badges.append("🌡️ Warm — Pfoten prüfen")
+        badges.append("🥵 Warm")
         penalty += (h["temp"] - heat["warn"]) * 4
 
     # --- Kaelte (gefuehlte Temperatur / Windchill) ---
@@ -1099,6 +1133,8 @@ LIVE_JS = r"""
   try { data = JSON.parse(node.textContent); } catch (e) { return; }
   var bannerEl = document.getElementById("today-banner");
   var ribbonEl = document.getElementById("today-ribbon");
+  var loadedAt = Date.now();
+  var RELOAD_AFTER_MS = 3600000;  // 1 h: lange offene Seite beim Zurueckkommen neu laden
 
   function berlin() {
     var f = new Intl.DateTimeFormat("en-GB", {
@@ -1178,14 +1214,21 @@ LIVE_JS = r"""
   tick();
   setInterval(tick, 60000);
   document.addEventListener("visibilitychange", function () {
-    if (!document.hidden) tick();
+    if (document.hidden) return;
+    // War die Seite lange offen (Handy weggelegt, spaeter zurueck), koennten die
+    // WETTERDATEN veraltet sein -- die rechnet nur ein neuer Build. Also einmal
+    // frisch laden. Der Reload setzt loadedAt zurueck -> keine Endlosschleife,
+    // falls serverseitig noch kein neuer Build bereitliegt.
+    if (Date.now() - loadedAt > RELOAD_AFTER_MS) { location.reload(); return; }
+    tick();
   });
 })();
 """
 
 
 def build_html(days: list[dict], cfg: dict, now: datetime,
-               outlook=None, week=None, notified: str = "") -> str:
+               outlook=None, week=None, notified: str = "",
+               rain_marker: str = "") -> str:
     loc = cfg["location"]["name"]
     stand = now.strftime("%d.%m.%Y, %H:%M Uhr")
     built_iso = now.replace(microsecond=0).isoformat()
@@ -1213,6 +1256,7 @@ def build_html(days: list[dict], cfg: dict, now: datetime,
 <title>{APP_NAME}</title>
 {ICON_HEAD}
 <meta name="gassi-notified" content="{notified}">
+<meta name="gassi-rain-alert" content="{rain_marker}">
 <style>{CSS}</style>
 </head>
 <body>
@@ -1238,7 +1282,8 @@ def build_html(days: list[dict], cfg: dict, now: datetime,
 
   <footer class="foot">
     Gassi-Zeiten {wh['start']}–{wh['end']} Uhr &middot;
-    Hitze ab {cfg['heat']['warn']}°/{cfg['heat']['bad']} °C &middot;
+    Asphalt ab {cfg['asphalt']['warn']}°/{cfg['asphalt']['bad']} °C (Boden) &middot;
+    Hitze ab {cfg['heat']['warn']}°/{cfg['heat']['bad']} °C (Luft) &middot;
     Kälte ab {cfg['cold']['warn']}° (gefühlt) &middot;
     Böen ab {cfg['wind']['gust_warn']} km/h &middot;
     Regen ab {cfg['rain']['prob_bad']} % &middot;
@@ -1272,7 +1317,7 @@ def build_html(days: list[dict], cfg: dict, now: datetime,
 
 
 def build_fallback_html(cfg: dict, now: datetime, err: str,
-                        notified: str = "") -> str:
+                        notified: str = "", rain_marker: str = "") -> str:
     """Notseite, falls Open-Meteo nach mehreren Versuchen nicht erreichbar ist.
     Wird deployt, damit die Live-URL nie kaputt/leer wirkt. Der Dedupe-Marker
     wird durchgereicht, damit ein Ausfall den Push-Zustand nicht loescht."""
@@ -1288,6 +1333,7 @@ def build_fallback_html(cfg: dict, now: datetime, err: str,
 <title>{APP_NAME}</title>
 {ICON_HEAD}
 <meta name="gassi-notified" content="{notified}">
+<meta name="gassi-rain-alert" content="{rain_marker}">
 <style>{CSS}</style>
 </head>
 <body>
@@ -1348,16 +1394,18 @@ def _notify_content(day: dict) -> tuple[str, str, str]:
 
 
 MARKER_RE = re.compile(r'name="gassi-notified"\s+content="([^"]*)"')
+RAIN_MARKER_RE = re.compile(r'name="gassi-rain-alert"\s+content="([^"]*)"')
 
 
-def read_live_marker(cfg: dict) -> str | None:
-    """Liest den 'zuletzt benachrichtigt'-Marker aus der aktuell VEROEFFENTLICHTEN
-    Seite. Das ist unser Dedupe-Speicher: Jeder Lauf startet auf einem frischen
-    Runner, die live stehende Seite ist der einzige gemeinsame Zustand.
-    Rueckgabe: Datum als 'JJJJ-MM-TT', '' wenn kein Marker, None bei Fehler."""
+def read_live_markers(cfg: dict) -> tuple[str | None, str | None]:
+    """Liest die beiden Dedupe-Marker aus der aktuell VEROEFFENTLICHTEN Seite:
+    (gassi-notified, gassi-rain-alert). Das ist unser Zustand ueber Laeufe hinweg
+    -- jeder Lauf startet auf frischem Runner, die live stehende Seite ist der
+    einzige gemeinsame Speicher. Rueckgabe je Marker: Wert, '' wenn nicht
+    vorhanden, None bei Fehler (fail-open: dann lieber einmal doppelt melden)."""
     url = cfg.get("site_url")
     if not url:
-        return None
+        return None, None
     try:
         r = httpx.get(f"{url}?cb={int(time.time())}",
                       headers={"User-Agent": USER_AGENT,
@@ -1365,12 +1413,11 @@ def read_live_marker(cfg: dict) -> str | None:
                       timeout=15, follow_redirects=True)
         r.raise_for_status()
         m = MARKER_RE.search(r.text)
-        return m.group(1) if m else ""
+        rm = RAIN_MARKER_RE.search(r.text)
+        return (m.group(1) if m else ""), (rm.group(1) if rm else "")
     except Exception as e:  # noqa: BLE001
-        # Fail-open: lieber einmal doppelt melden als den Morgen-Push verschlucken.
-        print(f"Hinweis: Marker nicht lesbar ({e}) -> Push nicht unterdrueckt.",
-              file=sys.stderr)
-        return None
+        print(f"Hinweis: Marker nicht lesbar ({e}) -> Dedupe aus.", file=sys.stderr)
+        return None, None
 
 
 def should_notify(mode: str, now: datetime, prev_marker: str | None,
@@ -1388,16 +1435,15 @@ def should_notify(mode: str, now: datetime, prev_marker: str | None,
     return True, "erster erfolgreicher Morgenlauf heute"
 
 
-def send_ntfy(day: dict, cfg: dict) -> bool:
-    """Schickt die Morgen-Zusammenfassung als Push an ntfy. Best-effort:
-    Fehler brechen den Build nie ab. Rueckgabe: True bei Erfolg."""
+def _push(title: str, body: str, tags: str, cfg: dict) -> bool:
+    """Schickt EINE ntfy-Nachricht. Best-effort: Fehler brechen den Build nie ab.
+    Titel und Tags muessen ASCII sein (HTTP-Header), der Text darf UTF-8 sein."""
     topic = os.environ.get("NTFY_TOPIC")
     if not topic:
         print("Hinweis: NTFY_TOPIC nicht gesetzt -> keine Push-Nachricht.",
               file=sys.stderr)
         return False
     server = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
-    title, body, tags = _notify_content(day)
     try:
         r = httpx.post(
             f"{server}/{topic}",
@@ -1411,11 +1457,52 @@ def send_ntfy(day: dict, cfg: dict) -> bool:
             timeout=15,
         )
         r.raise_for_status()
-        print(f"OK: Push an {server}/<topic> gesendet.")
+        print(f"OK: Push an {server}/<topic> gesendet ({title}).")
         return True
     except Exception as e:  # noqa: BLE001  (Push ist best-effort)
         print(f"Warnung: Push fehlgeschlagen: {e}", file=sys.stderr)
         return False
+
+
+def send_ntfy(day: dict, cfg: dict) -> bool:
+    """Schickt die Morgen-Zusammenfassung als Push. Rueckgabe: True bei Erfolg."""
+    title, body, tags = _notify_content(day)
+    return _push(title, body, tags, cfg)
+
+
+def rain_alert_signature(outlook, now: datetime, cfg: dict):
+    """Prueft, ob ein Regen-Alarm ansteht. Rueckgabe: (signatur, titel, text, tags)
+    oder None.
+
+    Gemeldet werden nur ACTIONABLE Uebergaenge -- Regenbeginn (jetzt noch trocken)
+    und Regenpause (regnet gerade, hoert bald auf) -- und nur, wenn sie im
+    Alarm-Fenster liegen und nah genug bevorstehen (lead_min). Dauerregen
+    ('rain_hold') und laengeres Trockensein ('dry') sind kein Ereignis.
+
+    Die Signatur ist pro Ereignis-STUNDE (kind + Datum/Stunde des Ereignisses):
+    kleines Vorhersage-Wackeln von Lauf zu Lauf loest so keinen zweiten Alarm aus,
+    ein wirklich anderes Ereignis (andere Art oder andere Stunde) schon."""
+    if not outlook:
+        return None
+    kind, dt = outlook
+    if kind not in ("rain_soon", "dry_soon") or dt is None:
+        return None
+    ra = cfg["rain_alert"]
+    w = ra["window"]
+    if not (w["start"] <= now.hour < w["end"]):
+        return None
+    lead = (dt - now).total_seconds() / 60.0
+    if lead < 0 or lead > ra["lead_min"]:
+        return None
+    hhmm = dt.strftime("%H:%M")
+    sig = f"{kind}:{dt.strftime('%Y-%m-%dT%H')}"
+    if kind == "rain_soon":
+        return (sig, f"Regen ab {hhmm} Uhr",
+                f"Noch trocken — Regen ab ca. {hhmm} Uhr. Jetzt die Runde vorziehen?",
+                "dog2,umbrella")
+    return (sig, f"Regenpause ab {hhmm} Uhr",
+            f"Ab ca. {hhmm} Uhr trocken — jetzt ein gutes Gassi-Fenster.",
+            "dog2,sunny")
 
 
 # ---------------------------------------------------------------------------
@@ -1445,8 +1532,9 @@ def main() -> int:
     # Dedupe-Marker aus der live stehenden Seite lesen (einziger Zustand ueber
     # Laeufe hinweg). Immer lesen, damit ihn auch stille Deploys nicht loeschen.
     today_iso = now.date().isoformat()
-    prev_marker = read_live_marker(CONFIG)
+    prev_marker, prev_rain = read_live_markers(CONFIG)
     mode = os.environ.get("GASSI_NOTIFY", "")
+    rain_mode = os.environ.get("GASSI_RAIN", "")
 
     print(f"Ziehe Wetter für {CONFIG['location']['name']} ...")
     try:
@@ -1472,14 +1560,32 @@ def main() -> int:
         marker = today_iso if (sent or prev_marker == today_iso) \
             else (prev_marker or "")
 
+        # Regen-Alarm (eigener Auslöser gassi-rain-check) -- unabhaengig vom
+        # Morgen-Push. Nur bei einem neuen, actionable Uebergang und nur einmal
+        # je Ereignis-Stunde (Dedupe ueber den gassi-rain-alert-Marker).
+        rain_marker = prev_rain or ""
+        if rain_mode:
+            alert = rain_alert_signature(outlook, now, CONFIG)
+            if alert:
+                sig, r_title, r_body, r_tags = alert
+                if sig != prev_rain:
+                    if _push(r_title, r_body, r_tags, CONFIG):
+                        rain_marker = sig
+                else:
+                    print("  Regen-Alarm: fuer dieses Ereignis schon gemeldet.")
+            else:
+                print("  Regen-Alarm: kein meldenswerter Uebergang.")
+
         out_file.write_text(
-            build_html(days, CONFIG, now, outlook, daily, marker),
+            build_html(days, CONFIG, now, outlook, daily, marker, rain_marker),
             encoding="utf-8")
-        print(f"OK: {out_file} geschrieben (Marker: {marker or '-'}).")
+        print(f"OK: {out_file} geschrieben (Marker: {marker or '-'}, "
+              f"Regen: {rain_marker or '-'}).")
     except Exception as e:  # noqa: BLE001  (API/Parsing-Ausfall -> Notseite)
         print(f"FEHLER: {e}\n  -> schreibe Fallback-Seite.", file=sys.stderr)
         out_file.write_text(
-            build_fallback_html(CONFIG, now, str(e), prev_marker or ""),
+            build_fallback_html(CONFIG, now, str(e), prev_marker or "",
+                                prev_rain or ""),
             encoding="utf-8")
     return 0
 
