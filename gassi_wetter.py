@@ -849,12 +849,17 @@ def _ribbon_html(day: dict, cfg: dict) -> str:
             title = f"{hr:02d} Uhr"
         if sr is not None and (hr < sr or hr >= ss):
             cls.append("night")
-        cells += f'<span class="{" ".join(cls)}" title="{title}"></span>'
+        # data-hour: nur der Heute-Streifen wird per JS live nachgezogen
+        # (Jetzt-Marker + Vergangenheit blass), siehe LIVE_JS.
+        cells += (f'<span class="{" ".join(cls)}" data-hour="{hr}" '
+                  f'title="{title}"></span>')
     span = wh["end"] - wh["start"]
     ticks = [wh["start"], wh["start"] + round(span / 3),
              wh["start"] + round(2 * span / 3), wh["end"] + 1]
     ax = "".join(f"<span>{t:02d}</span>" for t in ticks)
-    return f'<div class="ribbon">{cells}</div><div class="ribbon-ax">{ax}</div>'
+    rid = ' id="today-ribbon"' if day.get("is_today") else ""
+    return (f'<div class="ribbon"{rid}>{cells}</div>'
+            f'<div class="ribbon-ax">{ax}</div>')
 
 
 def _suninfo_html(day: dict) -> str:
@@ -947,7 +952,12 @@ def _best_banner(day: dict) -> str:
 
 
 def _day_html(day: dict, cfg: dict, now: datetime) -> str:
-    banner = _now_next_banner(day, now) if day["is_today"] else _best_banner(day)
+    if day["is_today"]:
+        # Der Heute-Banner (Countdown/Jetzt-Fenster) ist rein zeitabhaengig und
+        # wird im Browser minuetlich neu gerechnet -> in eine adressierbare Huelle.
+        banner = f'<div id="today-banner">{_now_next_banner(day, now)}</div>'
+    else:
+        banner = _best_banner(day)
     if day["windows"]:
         cards = "".join(_card_html(w) for w in day["windows"])
     else:
@@ -1067,6 +1077,113 @@ def write_icons(out_dir: Path) -> None:
         json.dumps(MANIFEST, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+# ---------------------------------------------------------------------------
+# LIVE-ZEIT  --  rechnet die uhrzeit-abhaengigen Teile im Browser neu
+# ---------------------------------------------------------------------------
+# Der Heute-Banner (Countdown/Jetzt-Fenster) und der Jetzt-Marker im
+# Stundenstreifen haengen NUR an der aktuellen Uhrzeit, nicht am Wetter. Beim
+# Bauen wurden sie einmal eingefroren; sobald die Uhr weiterlaeuft, stimmen sie
+# nicht mehr (z.B. "noch 41 Min bis 13 Uhr", obwohl es schon 13:30 ist). Dieses
+# Skript zieht sie aus den mitgelieferten Fensterdaten minuetlich nach -- ganz
+# ohne neuen Bau. Die Wetterbewertung selbst bleibt Sache des Build-Laufs.
+#
+# Die Logik spiegelt _now_next_banner()/_banner() 1:1, damit der im Browser
+# erzeugte Banner identisch zum servergerenderten aussieht. Zeitbasis ist
+# bewusst die Wanduhr in Europe/Berlin (per Intl), nicht die Geraetezeit --
+# so stimmt es auch, wenn das Handy in einer anderen Zeitzone haengt.
+LIVE_JS = r"""
+(function () {
+  var node = document.getElementById("gassi-data");
+  if (!node) return;
+  var data;
+  try { data = JSON.parse(node.textContent); } catch (e) { return; }
+  var bannerEl = document.getElementById("today-banner");
+  var ribbonEl = document.getElementById("today-ribbon");
+
+  function berlin() {
+    var f = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/Berlin", year: "numeric", month: "2-digit",
+      day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+    });
+    var p = {};
+    f.formatToParts(new Date()).forEach(function (x) { p[x.type] = x.value; });
+    return { date: p.year + "-" + p.month + "-" + p.day,
+             hour: +p.hour, minute: +p.minute };
+  }
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+  function dur(m) {
+    if (m < 60) return m + " Min";
+    var h = Math.floor(m / 60), mm = m % 60;
+    return mm === 0 ? h + " Std" : h + " Std " + mm + " Min";
+  }
+  function range(w) {
+    if (w.start === w.end) return pad(w.start) + " Uhr";
+    return pad(w.start) + " – " + pad(w.end + 1) + " Uhr";
+  }
+  var COL = { good: "var(--good)", warn: "var(--warn)", bad: "var(--bad)" };
+  function banner(icon, title, value, tone) {
+    return '<div class="best" style="border-left-color:' + COL[tone] + '">'
+      + '<span class="best__ic">' + icon + '</span>'
+      + '<div><div class="best__t">' + title + '</div>'
+      + '<div class="best__v">' + value + '</div></div></div>';
+  }
+  function pick(cur) {
+    var ws = data.windows || [];
+    var s = function (w) { return w.start * 60; };
+    var e = function (w) { return (w.end + 1) * 60; };
+    var i, current = null;
+    for (i = 0; i < ws.length; i++)
+      if (s(ws[i]) <= cur && cur < e(ws[i])) { current = ws[i]; break; }
+    if (current && current.rating === "gut")
+      return banner("🐾", "Jetzt gute Zeit",
+        "noch " + dur(e(current) - cur) + " (bis " + pad(current.end + 1) + " Uhr)", "good");
+    var nxt = null;
+    for (i = 0; i < ws.length; i++)
+      if (ws[i].rating === "gut" && s(ws[i]) > cur) { nxt = ws[i]; break; }
+    if (nxt)
+      return banner("⏳", "Nächstes gutes Fenster",
+        range(nxt) + " — in " + dur(s(nxt) - cur), "good");
+    if (current && current.rating === "mittel")
+      return banner("👍", "Jetzt geht es",
+        "Mittel bis " + pad(current.end + 1) + " Uhr", "warn");
+    var nm = null;
+    for (i = 0; i < ws.length; i++)
+      if (ws[i].rating === "mittel" && s(ws[i]) > cur) { nm = ws[i]; break; }
+    if (nm)
+      return banner("👍", "Nur mittlere Fenster",
+        "nächstes " + range(nm) + " — in " + dur(s(nm) - cur), "warn");
+    return banner("🚫", "Kein gutes Fenster mehr heute",
+      "Morgen früh wieder schauen", "bad");
+  }
+  function paintRibbon(hour) {
+    if (!ribbonEl) return;
+    var cells = ribbonEl.querySelectorAll(".rc");
+    for (var i = 0; i < cells.length; i++) {
+      var raw = cells[i].getAttribute("data-hour");
+      if (raw === null) continue;
+      var h = +raw;
+      cells[i].classList.remove("past", "now");
+      if (h < hour) cells[i].classList.add("past");
+      else if (h === hour) cells[i].classList.add("now");
+    }
+  }
+  function tick() {
+    var now = berlin();
+    // Ist die Seite von einem anderen Tag, lassen wir den Server-Stand stehen
+    // (dann greift die separate Stale-Warnung) -- lieber nichts als Falsches.
+    if (now.date !== data.date) return;
+    if (bannerEl) bannerEl.innerHTML = pick(now.hour * 60 + now.minute);
+    paintRibbon(now.hour);
+  }
+  tick();
+  setInterval(tick, 60000);
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) tick();
+  });
+})();
+"""
+
+
 def build_html(days: list[dict], cfg: dict, now: datetime,
                outlook=None, week=None, notified: str = "") -> str:
     loc = cfg["location"]["name"]
@@ -1075,6 +1192,17 @@ def build_html(days: list[dict], cfg: dict, now: datetime,
     stale_h = cfg.get("stale_warn_h", 6)
     days_html = "".join(_day_html(d, cfg, now) for d in days)
     wh = cfg["walk_hours"]
+    # Daten fuer die Live-Nachberechnung im Browser: nur die (zukunftsgerichteten)
+    # Fenster von HEUTE plus das Baudatum als Tages-Waechter.
+    today_day = next((d for d in days if d.get("is_today")), None)
+    live_data = {
+        "date": now.date().isoformat(),
+        "windows": [
+            {"rating": w["rating"], "start": w["start_hour"], "end": w["end_hour"]}
+            for w in (today_day["windows"] if today_day else [])
+        ],
+    }
+    live_json = json.dumps(live_data, ensure_ascii=False)
     return f"""<!doctype html>
 <html lang="de">
 <head>
@@ -1118,6 +1246,8 @@ def build_html(days: list[dict], cfg: dict, now: datetime,
     Wetterdaten: <a href="https://open-meteo.com/">Open-Meteo</a> (kostenlos, ohne Gewähr) &middot;
     Automatische Aktualisierung morgens &amp; am frühen Nachmittag.
   </footer>
+<script type="application/json" id="gassi-data">{live_json}</script>
+<script>{LIVE_JS}</script>
 <script>
 // Blendet eine Warnung ein, wenn die Seite deutlich veraltet ist. Faengt jede
 // Ursache ab (Ausloeser tot, Token abgelaufen, API-Ausfall) -- ohne sie waere
