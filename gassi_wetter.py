@@ -1420,6 +1420,31 @@ def read_live_markers(cfg: dict) -> tuple[str | None, str | None]:
         return None, None
 
 
+def read_live_page(cfg: dict) -> str | None:
+    """Laedt die aktuell VEROEFFENTLICHTE Seite komplett (fuer den Fehler-Zweig:
+    lieber die letzten guten Daten stehen lassen als auf 'Keine Daten' kippen).
+    Rueckgabe: HTML-Text, oder None bei Fehler bzw. wenn die Live-Seite selbst
+    schon eine Fallback-Seite ist (dann gibt es nichts Gutes zu halten)."""
+    url = cfg.get("site_url")
+    if not url:
+        return None
+    try:
+        r = httpx.get(f"{url}?cb={int(time.time())}",
+                      headers={"User-Agent": USER_AGENT,
+                               "Cache-Control": "no-cache", "Pragma": "no-cache"},
+                      timeout=15, follow_redirects=True)
+        r.raise_for_status()
+        text = r.text
+        # "Keine Daten" steht ausschliesslich in build_fallback_html -> eindeutiger
+        # Marker fuer eine Fallback-Seite. Eine solche nicht erneut ausliefern.
+        if "Keine Daten" in text:
+            return None
+        return text
+    except Exception as e:  # noqa: BLE001
+        print(f"Hinweis: Live-Seite nicht ladbar ({e}).", file=sys.stderr)
+        return None
+
+
 def should_notify(mode: str, now: datetime, prev_marker: str | None,
                   cfg: dict) -> tuple[bool, str]:
     """Entscheidet, ob dieser Lauf pushen darf. Bewusst hier (nicht im YAML),
@@ -1582,11 +1607,25 @@ def main() -> int:
         print(f"OK: {out_file} geschrieben (Marker: {marker or '-'}, "
               f"Regen: {rain_marker or '-'}).")
     except Exception as e:  # noqa: BLE001  (API/Parsing-Ausfall -> Notseite)
-        print(f"FEHLER: {e}\n  -> schreibe Fallback-Seite.", file=sys.stderr)
-        out_file.write_text(
-            build_fallback_html(CONFIG, now, str(e), prev_marker or "",
-                                prev_rain or ""),
-            encoding="utf-8")
+        # Ein einzelner Open-Meteo-Aussetzer soll die gute Seite NICHT auf
+        # "Keine Daten" kippen. Zuerst versuchen, die letzte gute, veroeffentlichte
+        # Seite erneut auszuliefern (Daten bleiben stehen, ggf. leicht veraltet --
+        # die Stale-Warnung im Browser greift). Erst wenn das nicht geht (kein
+        # site_url, Live-Seite nicht ladbar, oder die Live-Seite ist selbst schon
+        # ein Fallback), die "Keine Daten"-Notseite schreiben.
+        print(f"FEHLER: {e}", file=sys.stderr)
+        live = read_live_page(CONFIG)
+        if live:
+            out_file.write_text(live, encoding="utf-8")
+            print("  -> Letzte gute Seite erneut ausgeliefert "
+                  "(Fetch-Aussetzer, Daten unveraendert).", file=sys.stderr)
+        else:
+            out_file.write_text(
+                build_fallback_html(CONFIG, now, str(e), prev_marker or "",
+                                    prev_rain or ""),
+                encoding="utf-8")
+            print("  -> Fallback-Seite geschrieben (keine gute Seite verfuegbar).",
+                  file=sys.stderr)
     return 0
 
 
