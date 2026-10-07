@@ -1,0 +1,95 @@
+name: Deploy-Watchdog
+
+# Bricht einen Gassi-Wetter-Lauf ab, dessen deploy-Job auf GitHub-Seite
+# festhaengt (Status "waiting" auf dem github-pages-Environment, ohne Reviewer,
+# ohne Timer). Hintergrund: die pages-Concurrency-Gruppe hat bewusst
+# cancel-in-progress: false (Dedupe-Marker des Morgen-Pushs). Ein einziger
+# haengender Deploy blockiert damit die Gruppe, jeder Folgelauf wird als
+# ueberholt "cancelled" und die Seite friert ein. Passiert am 01.10. (#3744)
+# und 06./07.10. (#4076), jeweils ~18-24 h lang, Fix beide Male: Lauf abbrechen.
+#
+# Dieser Workflow liegt bewusst AUSSERHALB der pages-Gruppe, damit er nie
+# selbst in der Warteschlange haengt.
+
+on:
+  # Huckepack auf dem puenktlichen cron-job.org-Trigger (alle 30 Min):
+  # jeder gassi-rain-check startet auch den Watchdog.
+  repository_dispatch:
+    types: [gassi-rain-check, gassi-morning, gassi-refresh]
+  # Notnagel, falls cron-job.org ausfaellt (GitHub-Cron ist "best effort").
+  schedule:
+    - cron: "17 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Nur melden, nichts abbrechen"
+        type: boolean
+        default: false
+
+permissions:
+  actions: write    # Laeufe auflisten und abbrechen
+  contents: read
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      WORKFLOW: gassi.yml
+      DEPLOY_JOB: deploy
+      # Ein normaler Deploy braucht < 1 Min. 20 Min Luft, damit ein langsamer
+      # Pages-Tag nicht faelschlich abgebrochen wird.
+      MAX_MINUTES: "20"
+      DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+    steps:
+      - name: Haengende Deploys suchen und abbrechen
+        run: |
+          set -euo pipefail
+          now=$(date -u +%s)
+
+          for status in waiting in_progress; do
+            gh api "repos/$REPO/actions/workflows/$WORKFLOW/runs?status=$status&per_page=20" \
+              --jq '.workflow_runs[] | "\(.id) \(.run_number)"' |
+            while read -r id num; do
+              # Der deploy-Job dieses Laufs: haengt er, und seit wann?
+              job=$(gh api "repos/$REPO/actions/runs/$id/jobs" \
+                --jq "[.jobs[] | select(.name == \"$DEPLOY_JOB\" and (.status == \"waiting\" or .status == \"queued\" or .status == \"in_progress\"))][0] // empty | \"\(.status) \(.started_at // .created_at)\"")
+              [ -z "$job" ] && continue
+              jstatus=${job%% *}
+              since=${job#* }
+              age=$(( (now - $(date -u -d "$since" +%s)) / 60 ))
+              echo "Lauf #$num: deploy $jstatus seit $age Min ($since)"
+              [ "$age" -lt "$MAX_MINUTES" ] && continue
+
+              echo "found" > /tmp/found
+              msg="Gassi-Wetter: deploy von Lauf #$num hing $age Min ($jstatus)"
+              if [ -n "$DRY_RUN" ]; then
+                echo "::warning::$msg - Probelauf, nicht abgebrochen"
+                continue
+              fi
+
+              # Normal abbrechen; reicht das nach 30 s nicht, force-cancel.
+              gh api -X POST "repos/$REPO/actions/runs/$id/cancel" >/dev/null || true
+              sleep 30
+              state=$(gh api "repos/$REPO/actions/runs/$id" --jq .status)
+              if [ "$state" != "completed" ]; then
+                echo "Normaler Abbruch griff nicht ($state), force-cancel"
+                gh api -X POST "repos/$REPO/actions/runs/$id/force-cancel" >/dev/null || true
+              fi
+              echo "::warning::$msg - abgebrochen"
+              echo "- $msg - abgebrochen" >> "$GITHUB_STEP_SUMMARY"
+
+              if [ -n "${NTFY_TOPIC:-}" ]; then
+                curl -fsS -H "Title: Gassi-Watchdog" -H "Tags: dog,wrench" \
+                  -d "$msg - abgebrochen, der naechste Lauf deployt wieder." \
+                  "https://ntfy.sh/$NTFY_TOPIC" >/dev/null || true
+              fi
+            done
+          done
+
+          if [ ! -f /tmp/found ]; then
+            echo "Alles gut: kein haengender Deploy." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
